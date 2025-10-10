@@ -51,11 +51,21 @@ VkPipeline pipeline;
 // NOTE: Declare buffers and other variables here
 VulkanBuffer vertex_buffer;
 VulkanBuffer index_buffer;
+uint32_t index_count = 0u;
 
-Vector model_position = {0.0f, 0.0f, 5.0f};
+Vector model_position = {0.0f, 0.0f, 0.0f};
 float model_rotation;
 Vector model_color = {0.5f, 1.0f, 0.7f };
 bool model_spin = true;
+float puls_amp = 0.3f;
+float puls_freq = 1.5f;
+float scale_value = 1.0f;
+
+float camera_yaw = 0.0f;
+float camera_pitch = 0.0f;
+float camera_distance = 5.0f;
+
+float current_time = 0.0f;
 
 Matrix identity() {
 	Matrix result{};
@@ -90,6 +100,16 @@ Matrix translation(Vector vector) {
 	result.m[3][0] = vector.x;
 	result.m[3][1] = vector.y;
 	result.m[3][2] = vector.z;
+
+	return result;
+}
+
+Matrix scaling(Vector vector) {
+	Matrix result = identity();
+
+	result.m[0][0] = vector.x;
+	result.m[1][1] = vector.y;
+	result.m[2][2] = vector.z;
 
 	return result;
 }
@@ -129,9 +149,11 @@ Matrix multiply(const Matrix& a, const Matrix& b) {
 
 	for (int j = 0; j < 4; j++) {
 		for (int i = 0; i < 4; i++) {
+			float sum = 0.0f;
 			for (int k = 0; k < 4; k++) {
-				result.m[j][i] += a.m[j][k] * b.m[k][i];
+				sum += a.m[j][k] * b.m[k][i];
 			}
+			result.m[j][i] = sum;
 		}
 	}
 
@@ -142,6 +164,9 @@ Matrix multiply(const Matrix& a, const Matrix& b) {
 // NOTE: Your shaders are compiled via CMake with this code too, look it up
 VkShaderModule loadShaderModule(const char* path) {
 	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	if (!file.is_open()) {
+        return VK_NULL_HANDLE;
+    }
 	size_t size = file.tellg();
 	std::vector<uint32_t> buffer(size / sizeof(uint32_t));
 	file.seekg(0);
@@ -454,29 +479,70 @@ void initialize() {
 		}
 	}
 
-	// TODO: You define model vertices and create buffers here
-	// TODO: Index buffer has to be created here too
-	// NOTE: Look for createBuffer function
+	{ // NOTE: Geometry setup
+		// TODO: You define model vertices and create buffers here
+		// TODO: Index buffer has to be created here too
+		// NOTE: Look for createBuffer function
 
-	// (v0)------(v1)
-	//  |  \       |
-	//  |   `--,   |
-	//  |       \  |
-	// (v3)------(v2)
-	Vertex vertices[] = {
-		{{-1.0f, -1.0f, 0.0f}},
-		{{1.0f, -1.0f, 0.0f}},
-		{{1.0f, 1.0f, 0.0f}},
-		{{-1.0f, 1.0f, 0.0f}},
-	};
+		// (v0)------(v1)
+		//  |  \       |
+		//  |   `--,   |
+		//  |       \  |
+		// (v3)------(v2)
+		// Vertex vertices[] = {
+		// 	{{-1.0f, -1.0f, 0.0f}},
+		// 	{{1.0f, -1.0f, 0.0f}},
+		// 	{{1.0f, 1.0f, 0.0f}},
+		// 	{{-1.0f, 1.0f, 0.0f}},
+		// };
 
-	uint32_t indices[] = { 0, 1, 2, 2, 3, 0 };
+		// uint32_t indices[] = { 0, 1, 2, 2, 3, 0 };
 
-	vertex_buffer = createBuffer(sizeof(vertices), vertices,
-	                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+		// Parametric sphere
+		const int stacks = 9;
+		const int slices = 10;
+		const float radius = 1.0f;
 
-	index_buffer = createBuffer(sizeof(indices), indices,
-	                            VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		std::vector<Vertex> vertices;
+		std::vector<uint32_t> indices;
+
+		vertices.reserve((stacks + 1) * (slices + 1));
+		indices.reserve(stacks * slices * 6);
+
+		for (int i = 0; i <= stacks; ++i) {
+			float phi = M_PI * float(i) / float(stacks); // 0..PI
+			float y = cosf(phi);
+			float r_sin = sinf(phi);
+			for (int j = 0; j <= slices; ++j) {
+				float theta = 2.0f * M_PI * float(j) / float(slices); // 0..2PI
+				float x = r_sin * cosf(theta);
+				float z = r_sin * sinf(theta);
+				Vertex v;
+				v.position = {radius * x, radius * y, radius * z};
+				vertices.push_back(v);
+			}
+		}
+
+		for (int i = 0; i < stacks; ++i) {
+			for (int j = 0; j < slices; ++j) {
+				uint32_t a = uint32_t(i * (slices + 1) + j);
+				uint32_t b = uint32_t((i + 1) * (slices + 1) + j);
+				uint32_t c = uint32_t((i + 1) * (slices + 1) + (j + 1));
+				uint32_t d = uint32_t(i * (slices + 1) + (j + 1));
+
+				indices.push_back(a); indices.push_back(b); indices.push_back(c);
+				indices.push_back(a); indices.push_back(c); indices.push_back(d);
+			}
+		}
+
+		vertex_buffer = createBuffer(vertices.size() * sizeof(Vertex), vertices.data(),
+									VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+
+		index_buffer = createBuffer(indices.size() * sizeof(uint32_t), indices.data(),
+									VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+		
+		index_count = static_cast<uint32_t>(indices.size());
+	}
 }
 
 void shutdown() {
@@ -493,11 +559,29 @@ void shutdown() {
 }
 
 void update(double time) {
+	current_time = static_cast<float>(time);
+
 	ImGui::Begin("Controls:");
 	ImGui::InputFloat3("Translation", reinterpret_cast<float*>(&model_position));
 	ImGui::SliderFloat("Rotation", &model_rotation, 0.0f, 2.0f * M_PI);
 	ImGui::Checkbox("Spin?", &model_spin);
+
 	// TODO: Your GUI stuff here
+	ImGui::Separator();
+	ImGui::Text("Camera:");
+    ImGui::SliderFloat("Yaw", &camera_yaw, -M_PI, M_PI);
+    ImGui::SliderFloat("Pitch", &camera_pitch, -1.4f, 1.4f);
+    ImGui::SliderFloat("Distance", &camera_distance, 0.1f, 50.0f);
+
+	ImGui::Separator();
+	ImGui::ColorEdit3("Color", reinterpret_cast<float*>(&model_color));
+
+	ImGui::Separator();
+	ImGui::Text("Pulsation:");
+	ImGui::SliderFloat("Amplitude", &puls_amp, 0.0f, 2.0f);
+	ImGui::SliderFloat("Frequency", &puls_freq, 0.0f, 10.0f);
+	ImGui::Text("Scale value: %.3f", scale_value);
+
 	ImGui::End();
 
 	// NOTE: Animation code and other runtime variable updates go here
@@ -506,6 +590,9 @@ void update(double time) {
 	}
 
 	model_rotation = fmodf(model_rotation, 2.0f * M_PI);
+
+	// Pulsation effect
+	scale_value = 10.0f + puls_amp * sinf(current_time * puls_freq); // Must be > 0
 }
 
 void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
@@ -557,6 +644,20 @@ void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
 		// NOTE: Use our quad index buffer
 		vkCmdBindIndexBuffer(cmd, index_buffer.buffer, offset, VK_INDEX_TYPE_UINT32);
 
+		Vector camera_position;
+		camera_position.x = camera_distance * cosf(camera_pitch) * sinf(camera_yaw);
+		camera_position.y = camera_distance * sinf(camera_pitch);
+		camera_position.z = camera_distance * cosf(camera_pitch) * cosf(camera_yaw);
+
+		Matrix view = translation ({ -camera_position.x, -camera_position.y, -camera_position.z });
+
+		Matrix scale = scaling({ scale_value, scale_value, scale_value });
+		Matrix rot = rotation({ 0.0f, 1.0f, 0.0f }, model_rotation);
+		Matrix trans = translation(model_position);
+
+		Matrix model = multiply(rot, scale);
+		model = multiply(trans, model);
+
 		// NOTE: Variables like model_XXX were declared globally
 		ShaderConstants constants{
 			.projection = projection(
@@ -564,8 +665,9 @@ void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
 				float(veekay::app.window_width) / float(veekay::app.window_height),
 				camera_near_plane, camera_far_plane),
 
-			.transform = multiply(rotation({0.0f, 1.0f, 0.0f}, model_rotation),
-			                      translation(model_position)),
+			// .transform = multiply(rotation({0.0f, 1.0f, 0.0f}, model_rotation),
+			//                       translation(model_position)),
+			.transform = multiply(view, model),
 
 			.color = model_color,
 		};
@@ -576,7 +678,7 @@ void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
 		                   0, sizeof(ShaderConstants), &constants);
 
 		// NOTE: Draw 6 indices (3 vertices * 2 triangles), 1 group, no offsets
-		vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
+		vkCmdDrawIndexed(cmd, index_count, 1, 0, 0, 0);
 	}
 
 	vkCmdEndRenderPass(cmd);
