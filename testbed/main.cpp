@@ -32,10 +32,16 @@ struct Vertex {
 };
 
 // NOTE: These variable will be available to shaders through push constant uniform
+// struct ShaderConstants {
+// 	Matrix projection;
+// 	Matrix transform;
+// 	Vector color;
+// };
+
+// NOTE: 16 bytes alignment for vec3
 struct ShaderConstants {
-	Matrix projection;
-	Matrix transform;
-	Vector color;
+	Matrix mvp;
+	alignas(16) Vector color;
 };
 
 struct VulkanBuffer {
@@ -55,7 +61,7 @@ uint32_t index_count = 0u;
 
 Vector model_position = {0.0f, 0.0f, 0.0f};
 float model_rotation;
-Vector model_color = {0.5f, 1.0f, 0.7f };
+Vector model_color = {255.0f, 255.0f, 255.0f };
 bool model_spin = true;
 float puls_amp = 0.3f;
 float puls_freq = 1.5f;
@@ -158,6 +164,60 @@ Matrix multiply(const Matrix& a, const Matrix& b) {
 	}
 
 	return result;
+}
+
+Matrix transpose(const Matrix &a) {
+    Matrix r{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            r.m[i][j] = a.m[j][i];
+        }
+    }
+    return r;
+}
+
+Vector cross(const Vector& a, const Vector& b) {
+	return {
+		a.y * b.z - a.z * b.y,
+		a.z * b.x - a.x * b.z,
+		a.x * b.y - a.y * b.x
+	};
+}
+
+Vector normalize(const Vector& v) {
+	float length = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+	return { v.x / length, v.y / length, v.z / length };
+}
+
+Vector add(const Vector& a, const Vector& b) {
+	return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+
+float dot(const Vector& a, const Vector& b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+Matrix lookAt(const Vector& eye, const Vector& center, const Vector& up) {
+    Vector f = normalize({ center.x - eye.x, center.y - eye.y, center.z - eye.z }); // forward
+    Vector s = normalize(cross(f, up)); // right
+    Vector u = cross(s, f);             // true up
+
+    Matrix m = identity();
+
+    // Заполняем матрицу в row-vector формате:
+    // первые 3 строки — базис (right, up, -forward) как строки,
+    // последняя строка — перевод (dot с отрицанием/положением).
+    m.m[0][0] = s.x; m.m[0][1] = s.y; m.m[0][2] = s.z; m.m[0][3] = 0.0f;
+    m.m[1][0] = u.x; m.m[1][1] = u.y; m.m[1][2] = u.z; m.m[1][3] = 0.0f;
+    m.m[2][0] = -f.x; m.m[2][1] = -f.y; m.m[2][2] = -f.z; m.m[2][3] = 0.0f;
+
+    // translation row (last row) — преобразование точки в систему камеры
+    m.m[3][0] = -dot(eye, s);
+    m.m[3][1] = -dot(eye, u);
+    m.m[3][2] =  dot(eye, f);
+    m.m[3][3] = 1.0f;
+
+    return m;
 }
 
 // NOTE: Loads shader byte code from file
@@ -592,7 +652,7 @@ void update(double time) {
 	model_rotation = fmodf(model_rotation, 2.0f * M_PI);
 
 	// Pulsation effect
-	scale_value = 10.0f + puls_amp * sinf(current_time * puls_freq); // Must be > 0
+	scale_value = 2.0f + puls_amp * sinf(current_time * puls_freq); // Must be > 0
 }
 
 void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
@@ -644,30 +704,39 @@ void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
 		// NOTE: Use our quad index buffer
 		vkCmdBindIndexBuffer(cmd, index_buffer.buffer, offset, VK_INDEX_TYPE_UINT32);
 
-		Vector camera_position;
-		camera_position.x = camera_distance * cosf(camera_pitch) * sinf(camera_yaw);
-		camera_position.y = camera_distance * sinf(camera_pitch);
-		camera_position.z = camera_distance * cosf(camera_pitch) * cosf(camera_yaw);
+		Vector camera_position = { 0.0f, 0.0f, camera_distance };
+		Vector scene_center = model_position;
+		Vector forward = { 
+			cosf(camera_pitch) * sinf(camera_yaw),
+			sinf(camera_pitch),
+			cosf(camera_pitch) * cosf(camera_yaw) 
+		}; 
+		// View direction
+		Vector center = add(camera_position, forward);
 
-		Matrix view = translation ({ -camera_position.x, -camera_position.y, -camera_position.z });
+		Matrix view = lookAt(camera_position, center, {0.0f, 1.0f, 0.0f});
+
 
 		Matrix scale = scaling({ scale_value, scale_value, scale_value });
 		Matrix rot = rotation({ 0.0f, 1.0f, 0.0f }, model_rotation);
 		Matrix trans = translation(model_position);
 
-		Matrix model = multiply(rot, scale);
-		model = multiply(trans, model);
+		Matrix model = multiply(trans, multiply(rot, scale));
+
+		float aspect = float(veekay::app.window_width) / float(veekay::app.window_height);
+		Matrix proj = projection(camera_fov, aspect, camera_near_plane, camera_far_plane);
+
+		Matrix transform = multiply(model, view);
+
+		Matrix mvp = multiply(transform, proj);
 
 		// NOTE: Variables like model_XXX were declared globally
 		ShaderConstants constants{
-			.projection = projection(
-				camera_fov,
-				float(veekay::app.window_width) / float(veekay::app.window_height),
-				camera_near_plane, camera_far_plane),
+			// .projection = proj,
 
 			// .transform = multiply(rotation({0.0f, 1.0f, 0.0f}, model_rotation),
 			//                       translation(model_position)),
-			.transform = multiply(view, model),
+			.mvp = transpose(mvp),
 
 			.color = model_color,
 		};
