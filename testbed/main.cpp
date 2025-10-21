@@ -17,6 +17,7 @@ namespace {
 constexpr float camera_fov = 70.0f;
 constexpr float camera_near_plane = 0.01f;
 constexpr float camera_far_plane = 100.0f;
+constexpr float camera_speed = 5.0e-2f;
 
 struct Matrix {
 	float m[4][4];
@@ -628,7 +629,10 @@ void update(double time) {
 
 	// TODO: Your GUI stuff here
 	ImGui::Separator();
-	ImGui::Text("Camera:");
+	// ImGui::Text("Camera:");
+    ImGui::Text("Camera (you can use arrow keys):");
+    ImGui::Text("Left / Right  rotate Yaw");
+    ImGui::Text("Up / Down  rotate Pitch");
     ImGui::SliderFloat("Yaw", &camera_yaw, -M_PI, M_PI);
     ImGui::SliderFloat("Pitch", &camera_pitch, -1.4f, 1.4f);
     ImGui::SliderFloat("Distance", &camera_distance, 0.1f, 50.0f);
@@ -643,6 +647,11 @@ void update(double time) {
 	ImGui::Text("Scale value: %.3f", scale_value);
 
 	ImGui::End();
+
+    if (ImGui::IsKeyDown(ImGuiKey_LeftArrow))  camera_yaw   -= camera_speed;
+    if (ImGui::IsKeyDown(ImGuiKey_RightArrow)) camera_yaw   += camera_speed;
+    if (ImGui::IsKeyDown(ImGuiKey_UpArrow))    camera_pitch += camera_speed;
+    if (ImGui::IsKeyDown(ImGuiKey_DownArrow))  camera_pitch -= camera_speed;
 
 	// NOTE: Animation code and other runtime variable updates go here
 	if (model_spin) {
