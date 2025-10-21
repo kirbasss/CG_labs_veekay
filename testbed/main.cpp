@@ -17,7 +17,7 @@ namespace {
 constexpr float camera_fov = 70.0f;
 constexpr float camera_near_plane = 0.01f;
 constexpr float camera_far_plane = 100.0f;
-constexpr float camera_speed = 5.0e-2f;
+constexpr float camera_speed = 5.0f / 100.0f;
 
 struct Matrix {
 	float m[4][4];
@@ -63,16 +63,23 @@ uint32_t index_count = 0u;
 Vector model_position = {0.0f, 0.0f, 0.0f};
 float model_rotation;
 Vector model_color = {255.0f, 255.0f, 255.0f };
-bool model_spin = true;
+bool model_spin = false;
 float puls_amp = 0.3f;
 float puls_freq = 1.5f;
 float scale_value = 1.0f;
 
 float camera_yaw = 0.0f;
 float camera_pitch = 0.0f;
-float camera_distance = 5.0f;
+float camera_distance = 18.0f;
 
 float current_time = 0.0f;
+
+// NOTE: Trajectory (figure inf sign) params
+bool animate_path = false;
+float path_amp_x = 2.0f;
+float path_amp_y = 1.5f;
+float path_speed = 1.7f;
+
 
 Matrix identity() {
 	Matrix result{};
@@ -629,7 +636,6 @@ void update(double time) {
 
 	// TODO: Your GUI stuff here
 	ImGui::Separator();
-	// ImGui::Text("Camera:");
     ImGui::Text("Camera (you can use arrow keys):");
     ImGui::Text("Left / Right  rotate Yaw");
     ImGui::Text("Up / Down  rotate Pitch");
@@ -645,6 +651,12 @@ void update(double time) {
 	ImGui::SliderFloat("Amplitude", &puls_amp, 0.0f, 2.0f);
 	ImGui::SliderFloat("Frequency", &puls_freq, 0.0f, 10.0f);
 	ImGui::Text("Scale value: %.3f", scale_value);
+
+    ImGui::Separator();
+    ImGui::Checkbox("Animate path (figure inf sign)", &animate_path);
+    ImGui::SliderFloat("Path amp X", &path_amp_x, 0.0f, 10.0f);
+    ImGui::SliderFloat("Path amp Y", &path_amp_y, 0.0f, 5.0f);
+    ImGui::SliderFloat("Path speed", &path_speed, 0.0f, 10.0f);
 
 	ImGui::End();
 
@@ -662,6 +674,13 @@ void update(double time) {
 
 	// Pulsation effect
 	scale_value = 2.0f + puls_amp * sinf(current_time * puls_freq); // Must be > 0
+    if (scale_value <= 0.001f) scale_value = 0.001f;
+
+    if (animate_path) {
+        float t = current_time * path_speed;
+        model_position.x = path_amp_x * cosf(t);
+        model_position.y = path_amp_y * sinf(t) * cosf(t);
+    }
 }
 
 void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
