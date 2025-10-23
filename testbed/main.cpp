@@ -30,6 +30,7 @@ struct Vector {
 struct Vertex {
 	Vector position;
 	// NOTE: You can add more attributes
+	Vector color;
 };
 
 // NOTE: These variable will be available to shaders through push constant uniform
@@ -62,7 +63,7 @@ uint32_t index_count = 0u;
 
 Vector model_position = {0.0f, 0.0f, 0.0f};
 float model_rotation;
-Vector model_color = {255.0f, 255.0f, 255.0f };
+Vector model_color = {0.7f, 0.2f, 0.924f};
 bool model_spin = false;
 float puls_amp = 0.3f;
 float puls_freq = 1.5f;
@@ -404,14 +405,14 @@ void initialize() {
 				.offset = offsetof(Vertex, position), // NOTE: Offset of "position" field in a Vertex struct
 			},
 			// NOTE: If you want more attributes per vertex, declare them here
-#if 0
+// #if 0
 			{
 				.location = 1, // NOTE: Second attribute
 				.binding = 0,
-				.format = VK_FORMAT_XXX,
-				.offset = offset(Vertex, your_attribute),
+				.format = VK_FORMAT_R32G32B32_SFLOAT,
+				.offset = offsetof(Vertex, color),
 			},
-#endif
+// #endif
 		};
 
 		// NOTE: Bring 
@@ -587,6 +588,11 @@ void initialize() {
 				float z = r_sin * sinf(theta);
 				Vertex v;
 				v.position = {radius * x, radius * y, radius * z};
+
+				// 0.701 0.207 0.9237 градиент сверху вниз
+				float t = (y + 1.0f) * 0.5f; // нормализуем y ∈ [-1,1] → [0,1]
+				v.color = { t, 0.5f * (1.0f - t), 1.0f - t };
+
 				vertices.push_back(v);
 			}
 		}
