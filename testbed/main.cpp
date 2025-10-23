@@ -589,8 +589,8 @@ void initialize() {
 				Vertex v;
 				v.position = {radius * x, radius * y, radius * z};
 
-				// 0.701 0.207 0.9237 градиент сверху вниз
-				float t = (y + 1.0f) * 0.5f; // нормализуем y ∈ [-1,1] → [0,1]
+				// NOTE: Gradient effect to bottom
+				float t = (y + 1.0f) * 0.5f;
 				v.color = { t, 0.5f * (1.0f - t), 1.0f - t };
 
 				vertices.push_back(v);
