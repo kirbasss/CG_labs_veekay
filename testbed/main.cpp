@@ -12,7 +12,7 @@
 #include <imgui.h>
 #include <lodepng.h>
 
-constexpr float M_PI = 3.14159265358979323846f;
+// constexpr float M_PI = 3.14159265358979323846f;
 
 namespace {
 
@@ -35,7 +35,7 @@ struct Vertex {
 	veekay::vec3 normal;
 	veekay::vec2 uv;
 	// NOTE: You can add more attributes
-	Vector color;
+	veekay::vec3 color;
 };
 
 struct SceneUniforms {
@@ -53,15 +53,11 @@ struct Mesh {
 	uint32_t indices;
 };
 
-// NOTE: Declare buffers and other variables here
-VulkanBuffer vertex_buffer;
-VulkanBuffer index_buffer;
-uint32_t index_count = 0u;
-
-Vector model_position = {0.0f, 0.0f, 0.0f};
-float model_rotation;
-Vector model_color = {0.7f, 0.2f, 0.924f};
-bool model_spin = false;
+// Sphere / animation globals
+veekay::vec3 sphere_position = {0.0f, -4.0f, 0.0f};
+float sphere_rotation = 0.0f;
+veekay::vec3 sphere_color = {0.7f, 0.2f, 0.924f};
+bool sphere_spin = false;
 float puls_amp = 0.3f;
 float puls_freq = 1.5f;
 float scale_value = 1.0f;
@@ -77,6 +73,9 @@ bool animate_path = false;
 float path_amp_x = 2.0f;
 float path_amp_y = 1.5f;
 float path_speed = 1.7f;
+veekay::vec3 path_origin = { 0.0f, 0.0f, 0.0f };
+bool path_origin_initialized = false;
+bool prev_animate_path = false;
 
 struct Transform {
 	veekay::vec3 position = {};
@@ -138,6 +137,7 @@ inline namespace {
 
 	Mesh plane_mesh;
 	Mesh cube_mesh;
+	Mesh sphere_mesh;
 
 	veekay::graphics::Texture* missing_texture;
 	VkSampler missing_texture_sampler;
@@ -154,8 +154,13 @@ veekay::mat4 Transform::matrix() const {
 	// TODO: Scaling and rotation
 
 	auto t = veekay::mat4::translation(position);
+	auto s = veekay::mat4::scaling(scale);
+    veekay::mat4 rx = veekay::mat4::rotation({1.0f, 0.0f, 0.0f}, rotation.x);
+    veekay::mat4 ry = veekay::mat4::rotation({0.0f, 1.0f, 0.0f}, rotation.y);
+    veekay::mat4 rz = veekay::mat4::rotation({0.0f, 0.0f, 1.0f}, rotation.z);
+	veekay::mat4 r = rz * ry * rx;
 
-	return t;
+	return s * r * t;
 }
 
 veekay::mat4 Camera::view() const {
@@ -203,28 +208,28 @@ float dot(const Vector& a, const Vector& b) {
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
-Matrix lookAt(const Vector& eye, const Vector& center, const Vector& up) {
-    Vector f = normalize({ center.x - eye.x, center.y - eye.y, center.z - eye.z }); // forward
-    Vector s = normalize(cross(f, up)); // right
-    Vector u = cross(s, f);             // true up
+// Matrix lookAt(const Vector& eye, const Vector& center, const Vector& up) {
+//     Vector f = normalize({ center.x - eye.x, center.y - eye.y, center.z - eye.z }); // forward
+//     Vector s = normalize(cross(f, up)); // right
+//     Vector u = cross(s, f);             // true up
 
-    Matrix m = identity();
+//     Matrix m = identity();
 
-    // Заполняем матрицу в row-vector формате:
-    // первые 3 строки — базис (right, up, -forward) как строки,
-    // последняя строка — перевод (dot с отрицанием/положением).
-    m.m[0][0] = s.x; m.m[0][1] = s.y; m.m[0][2] = s.z; m.m[0][3] = 0.0f;
-    m.m[1][0] = u.x; m.m[1][1] = u.y; m.m[1][2] = u.z; m.m[1][3] = 0.0f;
-    m.m[2][0] = -f.x; m.m[2][1] = -f.y; m.m[2][2] = -f.z; m.m[2][3] = 0.0f;
+//     // Заполняем матрицу в row-vector формате:
+//     // первые 3 строки — базис (right, up, -forward) как строки,
+//     // последняя строка — перевод (dot с отрицанием/положением).
+//     m.m[0][0] = s.x; m.m[0][1] = s.y; m.m[0][2] = s.z; m.m[0][3] = 0.0f;
+//     m.m[1][0] = u.x; m.m[1][1] = u.y; m.m[1][2] = u.z; m.m[1][3] = 0.0f;
+//     m.m[2][0] = -f.x; m.m[2][1] = -f.y; m.m[2][2] = -f.z; m.m[2][3] = 0.0f;
 
-    // translation row (last row) — преобразование точки в систему камеры
-    m.m[3][0] = -dot(eye, s);
-    m.m[3][1] = -dot(eye, u);
-    m.m[3][2] =  dot(eye, f);
-    m.m[3][3] = 1.0f;
+//     // translation row (last row) — преобразование точки в систему камеры
+//     m.m[3][0] = -dot(eye, s);
+//     m.m[3][1] = -dot(eye, u);
+//     m.m[3][2] =  dot(eye, f);
+//     m.m[3][3] = 1.0f;
 
-    return m;
-}
+//     return m;
+// }
 
 // NOTE: Loads shader byte code from file
 // NOTE: Your shaders are compiled via CMake with this code too, look it up
@@ -317,6 +322,12 @@ void initialize(VkCommandBuffer cmd) {
 				.binding = 0,
 				.format = VK_FORMAT_R32G32_SFLOAT,
 				.offset = offsetof(Vertex, uv),
+			},
+			{
+				.location = 3,
+				.binding = 0,
+				.format = VK_FORMAT_R32G32B32_SFLOAT,
+				.offset = offsetof(Vertex, color),
 			},
 		};
 
@@ -603,10 +614,10 @@ void initialize(VkCommandBuffer cmd) {
 		//  |       \  |
 		// (v3)------(v2)
 		std::vector<Vertex> vertices = {
-			{{-5.0f, 0.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-			{{5.0f, 0.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
-			{{5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
-			{{-5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+			{{-5.0f, 0.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{5.0f, 0.0f, 5.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, {1.0f,1.0f,1.0f}},
+			{{-5.0f, 0.0f, -5.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f,1.0f,1.0f}},
 		};
 
 		std::vector<uint32_t> indices = {
@@ -627,35 +638,35 @@ void initialize(VkCommandBuffer cmd) {
 	// NOTE: Cube mesh initialization
 	{
 		std::vector<Vertex> vertices = {
-			{{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}},
-			{{+0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
-			{{+0.5f, +0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
-			{{-0.5f, +0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
+			{{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, +0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, +0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, {1.0f,1.0f,1.0f}},
 
-			{{+0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-			{{+0.5f, -0.5f, +0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-			{{+0.5f, +0.5f, +0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
-			{{+0.5f, +0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+			{{+0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, -0.5f, +0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, +0.5f, +0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, +0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {1.0f,1.0f,1.0f}},
 
-			{{+0.5f, -0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
-			{{-0.5f, -0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}},
-			{{-0.5f, +0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-			{{+0.5f, +0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+			{{+0.5f, -0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, -0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, +0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, +0.5f, +0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, {1.0f,1.0f,1.0f}},
 
-			{{-0.5f, -0.5f, +0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-			{{-0.5f, -0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
-			{{-0.5f, +0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}},
-			{{-0.5f, +0.5f, +0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}},
+			{{-0.5f, -0.5f, +0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, -0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, +0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, +0.5f, +0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {1.0f,1.0f,1.0f}},
 
-			{{-0.5f, -0.5f, +0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}},
-			{{+0.5f, -0.5f, +0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}},
-			{{+0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}},
-			{{-0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}},
+			{{-0.5f, -0.5f, +0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, -0.5f, +0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f,1.0f,1.0f}},
 
-			{{-0.5f, +0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
-			{{+0.5f, +0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-			{{+0.5f, +0.5f, +0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
-			{{-0.5f, +0.5f, +0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}},
+			{{-0.5f, +0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, +0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, {1.0f,1.0f,1.0f}},
+			{{+0.5f, +0.5f, +0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}, {1.0f,1.0f,1.0f}},
+			{{-0.5f, +0.5f, +0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f,1.0f,1.0f}},
 		};
 
 		std::vector<uint32_t> indices = {
@@ -676,6 +687,67 @@ void initialize(VkCommandBuffer cmd) {
 			VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
 		cube_mesh.indices = uint32_t(indices.size());
+	}
+
+	// NOTE: Sphere mesh initialization
+	{
+		const int stacks = 32;
+		const int slices = 32;
+		const float radius = 1.0f;
+
+		std::vector<Vertex> vertices;
+		std::vector<uint32_t> indices;
+
+		vertices.reserve((stacks + 1) * (slices + 1));
+		indices.reserve(stacks * slices * 6);
+
+		for (int i = 0; i <= stacks; ++i) {
+			float phi = M_PI * float(i) / float(stacks); // 0..PI
+			float y = cosf(phi);
+			float r_sin = sinf(phi);
+			for (int j = 0; j <= slices; ++j) {
+				float theta = 2.0f * M_PI * float(j) / float(slices); // 0..2PI
+				float x = r_sin * cosf(theta);
+				float z = r_sin * sinf(theta);
+				Vertex v;
+				v.position = {radius * x, radius * y, radius * z};
+				// normal = normalized position for sphere
+				veekay::vec3 n = v.position;
+				float len = sqrtf(n.x*n.x + n.y*n.y + n.z*n.z);
+				if (len > 1e-6f) { n.x /= len; n.y /= len; n.z /= len; }
+				v.normal = n;
+				// UV spherical coords
+				float u = float(j) / float(slices);
+				float vcoord = float(i) / float(stacks);
+				v.uv = {u, vcoord};
+				// Vertical gradient
+				float t = (y + 1.0f) * 0.5f; // y in [-1,1] -> t in [0,1]
+				v.color = { t, 0.5f * (1.0f - t), 1.0f - t }; 
+				vertices.push_back(v);
+			}
+		}
+
+		for (int i = 0; i < stacks; ++i) {
+			for (int j = 0; j < slices; ++j) {
+				uint32_t a = uint32_t(i * (slices + 1) + j);
+				uint32_t b = uint32_t((i + 1) * (slices + 1) + j);
+				uint32_t c = uint32_t((i + 1) * (slices + 1) + (j + 1));
+				uint32_t d = uint32_t(i * (slices + 1) + (j + 1));
+
+				indices.push_back(a); indices.push_back(b); indices.push_back(c);
+				indices.push_back(a); indices.push_back(c); indices.push_back(d);
+			}
+		}
+
+		sphere_mesh.vertex_buffer = new veekay::graphics::Buffer(
+			vertices.size() * sizeof(Vertex), vertices.data(),
+			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+
+		sphere_mesh.index_buffer = new veekay::graphics::Buffer(
+			indices.size() * sizeof(uint32_t), indices.data(),
+			VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+		sphere_mesh.indices = uint32_t(indices.size());
 	}
 
 	// NOTE: Add models to scene
@@ -708,6 +780,15 @@ void initialize(VkCommandBuffer cmd) {
 		},
 		.albedo_color = veekay::vec3{0.0f, 0.0f, 1.0f}
 	});
+
+	models.emplace_back(Model{
+		.mesh = sphere_mesh,
+		.transform = Transform{
+			.position = {sphere_position.x, sphere_position.y, sphere_position.z},
+			.scale = {1.0f, 1.0f, 1.0f},
+		},
+		.albedo_color = sphere_color
+	});
 }
 
 // NOTE: Destroy resources here, do not cause leaks in your program!
@@ -722,6 +803,9 @@ void shutdown() {
 
 	delete plane_mesh.index_buffer;
 	delete plane_mesh.vertex_buffer;
+
+	delete sphere_mesh.index_buffer;
+	delete sphere_mesh.vertex_buffer;
 
 	delete model_uniforms_buffer;
 	delete scene_uniforms_buffer;
@@ -739,6 +823,35 @@ void update(double time) {
 	current_time = static_cast<float>(time);
 
 	ImGui::Begin("Controls:");
+
+	{ // sphere controls
+		ImGui::Text("Sphere:");
+		ImGui::InputFloat3("Translation", reinterpret_cast<float*>(&sphere_position));
+		ImGui::SliderFloat("Rotation", &sphere_rotation, 0.0f, 2.0f * M_PI);
+		ImGui::Checkbox("Spin?", &sphere_spin);
+
+		ImGui::Separator();
+		ImGui::ColorEdit3("Sphere color", reinterpret_cast<float*>(&sphere_color));
+
+		ImGui::Separator();
+		ImGui::Text("Pulsation:");
+		ImGui::SliderFloat("Amplitude", &puls_amp, 0.0f, 2.0f);
+		ImGui::SliderFloat("Frequency", &puls_freq, 0.0f, 10.0f);
+		ImGui::Text("Scale value: %.3f", scale_value);
+	}
+
+	ImGui::Separator();
+
+	// Camera controls
+	ImGui::Text("Camera:");
+	ImGui::InputFloat3("Cam position", reinterpret_cast<float*>(&camera.position));
+	ImGui::SliderFloat("FOV", &camera.fov, 10.0f, 120.0f);
+
+	ImGui::Separator();
+	ImGui::Checkbox("Animate path (figure inf sign)", &animate_path);
+	ImGui::SliderFloat("Path amp X", &path_amp_x, 0.0f, 10.0f);
+	ImGui::SliderFloat("Path amp Y", &path_amp_y, 0.0f, 5.0f);
+	ImGui::SliderFloat("Path speed", &path_speed, 0.0f, 10.0f);
 	ImGui::End();
 
 	if (!ImGui::IsWindowHovered()) {
@@ -751,35 +864,72 @@ void update(double time) {
 			
 			auto view = camera.view();
 
-			// TODO: Calculate right, up and front from view matrix
-			veekay::vec3 right = {1.0f, 0.0f, 0.0f};
-			veekay::vec3 up = {0.0f, -1.0f, 0.0f};
-			veekay::vec3 front = {0.0f, 0.0f, 1.0f};
-
-			if (keyboard::isKeyDown(keyboard::Key::w))
-				camera.position += front * 0.1f;
-
-			if (keyboard::isKeyDown(keyboard::Key::s))
-				camera.position -= front * 0.1f;
-
-			if (keyboard::isKeyDown(keyboard::Key::d))
-				camera.position += right * 0.1f;
-
-			if (keyboard::isKeyDown(keyboard::Key::a))
-				camera.position -= right * 0.1f;
-
-			if (keyboard::isKeyDown(keyboard::Key::q))
-				camera.position += up * 0.1f;
-
-			if (keyboard::isKeyDown(keyboard::Key::z))
-				camera.position -= up * 0.1f;
 		}
+		// TODO: Calculate right, up and front from view matrix
+		veekay::vec3 right = {1.0f, 0.0f, 0.0f};
+		veekay::vec3 up = {0.0f, -1.0f, 0.0f};
+		veekay::vec3 front = {0.0f, 0.0f, 1.0f};
+
+		if (keyboard::isKeyDown(keyboard::Key::w))
+			camera.position += front * 0.1f;
+
+		if (keyboard::isKeyDown(keyboard::Key::s))
+			camera.position -= front * 0.1f;
+
+		if (keyboard::isKeyDown(keyboard::Key::d))
+			camera.position += right * 0.1f;
+
+		if (keyboard::isKeyDown(keyboard::Key::a))
+			camera.position -= right * 0.1f;
+
+		if (keyboard::isKeyDown(keyboard::Key::q))
+			camera.position += up * 0.1f;
+
+		if (keyboard::isKeyDown(keyboard::Key::z))
+			camera.position -= up * 0.1f;
+	}
+
+	// Sphere animation updates
+	if (sphere_spin) {
+		sphere_rotation = float(time);
+	}
+	sphere_rotation = fmodf(sphere_rotation, 2.0f * M_PI);
+
+	// Pulsation effect
+	scale_value = 1.0f + puls_amp * sinf(current_time * puls_freq);
+	if (scale_value <= 0.001f) scale_value = 0.001f;
+
+	// Path animation (figure-eight) - updates sphere_position
+	if (animate_path && !prev_animate_path) {
+		path_origin = sphere_position;
+		path_origin_initialized = true;
+	}
+	prev_animate_path = animate_path;
+	if (animate_path) {
+		float t = current_time * path_speed;
+		float dx = path_amp_x * cosf(t);
+    	float dy = path_amp_y * sinf(t) * cosf(t);
+
+		sphere_position.x = path_origin.x + dx;
+		sphere_position.y = path_origin.y + dy;
+		sphere_position.z = path_origin.z;
 	}
 
 	float aspect_ratio = float(veekay::app.window_width) / float(veekay::app.window_height);
 	SceneUniforms scene_uniforms{
 		.view_projection = camera.view_projection(aspect_ratio),
 	};
+
+	// Update sphere model transform in models array (sphere placed at last index)
+	if (!models.empty()) {
+		size_t sphere_index = models.size() - 1;
+		Model& sphere_model = models[sphere_index];
+		sphere_model.transform.position = sphere_position;
+		sphere_model.transform.scale = veekay::vec3{scale_value, scale_value, scale_value};
+		sphere_model.transform.rotation.y = sphere_rotation;
+		// update albedo color from UI
+		sphere_model.albedo_color = sphere_color;
+	}
 
 	std::vector<ModelUniforms> model_uniforms(models.size());
 	for (size_t i = 0, n = models.size(); i < n; ++i) {
