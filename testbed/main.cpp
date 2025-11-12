@@ -12,7 +12,9 @@
 #include <imgui.h>
 #include <lodepng.h>
 
-// constexpr float M_PI = 3.14159265358979323846f;
+#ifndef M_PI
+constexpr float M_PI = 3.14159265358979323846f;
+#endif
 
 namespace {
 
@@ -21,14 +23,45 @@ constexpr float camera_near_plane = 0.01f;
 constexpr float camera_far_plane = 100.0f;
 constexpr float camera_speed = 5.0f / 100.0f;
 
-struct Matrix {
-	float m[4][4];
-};
+// struct Matrix {
+// 	float m[4][4];
+// };
 
 struct Vector {
 	float x, y, z;
 };
 constexpr uint32_t max_models = 1024;
+
+// std140 SceneUniforms (binding = 0 in shader)
+struct SceneUniforms {
+	veekay::mat4 view_projection;
+	veekay::vec4 camera_position;
+	veekay::vec4 dir_light_dir;
+	veekay::vec4 dir_light_color;
+};
+
+// std140 ModelUniforms (binding = 1 in shader)
+struct ModelUniforms {
+	veekay::mat4 model;
+	veekay::vec4 albedo_color;
+	veekay::vec4 specular_color;
+	veekay::vec4 misc;
+};
+
+// std430 PointLight layout (binding = 2)
+struct PointLightCPU {
+	veekay::vec4 pos_int;
+	veekay::vec4 color_radius;
+	veekay::vec4 atten;
+};
+
+// std430 SpotLight layout (binding = 3)
+struct SpotLightCPU {
+	veekay::vec4 pos_int;
+	veekay::vec4 dir_inner;
+	veekay::vec4 color_outer;
+	veekay::vec4 atten;
+};
 
 struct Vertex {
 	veekay::vec3 position;
@@ -38,20 +71,24 @@ struct Vertex {
 	veekay::vec3 color;
 };
 
-struct SceneUniforms {
-	veekay::mat4 view_projection;
-};
+// struct SceneUniforms {
+// 	veekay::mat4 view_projection;
+// };
 
-struct ModelUniforms {
-	veekay::mat4 model;
-	veekay::vec3 albedo_color; float _pad0;
-};
+// struct ModelUniforms {
+// 	veekay::mat4 model;
+// 	veekay::vec3 albedo_color; float _pad0;
+// };
 
 struct Mesh {
 	veekay::graphics::Buffer* vertex_buffer;
 	veekay::graphics::Buffer* index_buffer;
 	uint32_t indices;
 };
+
+// Lighting defaults
+int num_point_lights = 1;
+int num_spot_lights = 0;
 
 // Sphere / animation globals
 veekay::vec3 sphere_position = {0.0f, -4.0f, 0.0f};
@@ -89,7 +126,9 @@ struct Transform {
 struct Model {
 	Mesh mesh;
 	Transform transform;
-	veekay::vec3 albedo_color;
+	veekay::vec3 albedo_color = {1.0f, 1.0f, 1.0f};
+	veekay::vec3 specular_color = {1.0f, 1.0f, 1.0f};
+	float shininess = 32.0f;
 };
 
 struct Camera {
@@ -139,6 +178,9 @@ inline namespace {
 	Mesh cube_mesh;
 	Mesh sphere_mesh;
 
+	veekay::graphics::Buffer* point_lights_ssbo = nullptr;
+	veekay::graphics::Buffer* spot_lights_ssbo = nullptr;
+
 	veekay::graphics::Texture* missing_texture;
 	VkSampler missing_texture_sampler;
 
@@ -166,9 +208,13 @@ veekay::mat4 Transform::matrix() const {
 veekay::mat4 Camera::view() const {
 	// TODO: Rotation
 
-	auto t = veekay::mat4::translation(-position);
-
-	return t;
+	// auto t = veekay::mat4::translation(-position);
+	auto t = veekay::mat4::translation(position);
+	auto rx = veekay::mat4::rotation({1,0,0}, rotation.x);
+	auto ry = veekay::mat4::rotation({0,1,0}, rotation.y);
+	auto rz = veekay::mat4::rotation({0,0,1}, rotation.z);
+	auto cam = t * rz * ry * rx;
+	return veekay::mat4::inverse(cam);
 }
 
 veekay::mat4 Camera::view_projection(float aspect_ratio) const {
@@ -177,17 +223,17 @@ veekay::mat4 Camera::view_projection(float aspect_ratio) const {
 	return view() * projection;
 }
 
-Matrix transpose(const Matrix &a) {
-    Matrix r{};
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            r.m[i][j] = a.m[j][i];
-        }
-    }
-    return r;
-}
+// Matrix transpose(const Matrix &a) {
+//     Matrix r{};
+//     for (int i = 0; i < 4; ++i) {
+//         for (int j = 0; j < 4; ++j) {
+//             r.m[i][j] = a.m[j][i];
+//         }
+//     }
+//     return r;
+// }
 
-Vector cross(const Vector& a, const Vector& b) {
+veekay::vec3 cross(const veekay::vec3& a, const veekay::vec3& b) {
 	return {
 		a.y * b.z - a.z * b.y,
 		a.z * b.x - a.x * b.z,
@@ -195,16 +241,16 @@ Vector cross(const Vector& a, const Vector& b) {
 	};
 }
 
-Vector normalize(const Vector& v) {
+veekay::vec3 normalize(const veekay::vec3& v) {
 	float length = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 	return { v.x / length, v.y / length, v.z / length };
 }
 
-Vector add(const Vector& a, const Vector& b) {
+veekay::vec3 add(const veekay::vec3& a, const veekay::vec3& b) {
 	return { a.x + b.x, a.y + b.y, a.z + b.z };
 }
 
-float dot(const Vector& a, const Vector& b) {
+float dot(const veekay::vec3& a, const veekay::vec3& b) {
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
@@ -431,12 +477,16 @@ void initialize(VkCommandBuffer cmd) {
 				{
 					.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 					.descriptorCount = 8,
+				},
+				{
+					.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+					.descriptorCount = 8,
 				}
 			};
 			
 			VkDescriptorPoolCreateInfo info{
 				.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-				.maxSets = 1,
+				.maxSets = 4,
 				.poolSizeCount = sizeof(pools) / sizeof(pools[0]),
 				.pPoolSizes = pools,
 			};
@@ -464,6 +514,18 @@ void initialize(VkCommandBuffer cmd) {
 					.descriptorCount = 1,
 					.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 				},
+				{
+					.binding = 2, 
+					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 
+					.descriptorCount = 1,
+			  		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+				},
+				{
+					.binding = 3, 
+					.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 
+					.descriptorCount = 1,
+			  		.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+				}
 			};
 
 			VkDescriptorSetLayoutCreateInfo info{
@@ -543,6 +605,14 @@ void initialize(VkCommandBuffer cmd) {
 		max_models * veekay::graphics::Buffer::structureAlignment(sizeof(ModelUniforms)),
 		nullptr,
 		VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+	
+	const uint32_t max_point = 8;
+	const uint32_t max_spot = 4;
+	size_t point_ssbo_size = sizeof(int) * 4 + max_point * sizeof(PointLightCPU); // headroom for num + pads
+	size_t spot_ssbo_size = sizeof(int) * 4 + max_spot * sizeof(SpotLightCPU);
+
+	point_lights_ssbo = new veekay::graphics::Buffer(point_ssbo_size, nullptr, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	spot_lights_ssbo = new veekay::graphics::Buffer(spot_ssbo_size, nullptr, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
 	// NOTE: This texture and sampler is used when texture could not be loaded
 	{
@@ -579,6 +649,16 @@ void initialize(VkCommandBuffer cmd) {
 				.offset = 0,
 				.range = sizeof(ModelUniforms),
 			},
+			{
+				.buffer = point_lights_ssbo->buffer,
+				.offset = 0,
+				.range = VK_WHOLE_SIZE,
+			},
+			{
+				.buffer = spot_lights_ssbo->buffer,
+				.offset = 0,
+				.range = VK_WHOLE_SIZE,
+			}
 		};
 
 		VkWriteDescriptorSet write_infos[] = {
@@ -599,6 +679,24 @@ void initialize(VkCommandBuffer cmd) {
 				.descriptorCount = 1,
 				.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
 				.pBufferInfo = &buffer_infos[1],
+			},
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = descriptor_set,
+				.dstBinding = 2,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &buffer_infos[2],
+			},
+			{
+				.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+				.dstSet = descriptor_set,
+				.dstBinding = 3,
+				.dstArrayElement = 0,
+				.descriptorCount = 1,
+				.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+				.pBufferInfo = &buffer_infos[3],
 			},
 		};
 
@@ -789,6 +887,33 @@ void initialize(VkCommandBuffer cmd) {
 		},
 		.albedo_color = sphere_color
 	});
+
+	{
+		char* mem = static_cast<char*>(point_lights_ssbo->mapped_region);
+		int* header = reinterpret_cast<int*>(mem);
+		header[0] = num_point_lights;
+		header[1] = 0; header[2] = 0; header[3] = 0;
+		PointLightCPU *pls = reinterpret_cast<PointLightCPU*>(mem + 16);
+
+		// One white point light above scene
+		PointLightCPU pl{};
+		pl.pos_int = veekay::vec4{0.0f, 3.0f, 0.0f, 2.0f};
+		pl.color_radius = veekay::vec4{1.0f, 1.0f, 1.0f, 10.0f};
+		pl.atten = veekay::vec4{1.0f, 0.09f, 0.032f, 1.0f};
+		pls[0] = pl;
+
+		for (uint32_t i = 1; i < 8; ++i) pls[i] = PointLightCPU{};
+	}
+
+	{
+		char* mem = static_cast<char*>(spot_lights_ssbo->mapped_region);
+		int* header = reinterpret_cast<int*>(mem);
+		header[0] = num_spot_lights;
+		header[1] = 0; header[2] = 0; header[3] = 0;
+		// No spot lights by default
+		SpotLightCPU *sls = reinterpret_cast<SpotLightCPU*>(mem + 16);
+		for (uint32_t i = 0; i < 4; ++i) sls[i] = SpotLightCPU{};
+	}
 }
 
 // NOTE: Destroy resources here, do not cause leaks in your program!
@@ -806,6 +931,9 @@ void shutdown() {
 
 	delete sphere_mesh.index_buffer;
 	delete sphere_mesh.vertex_buffer;
+
+	delete point_lights_ssbo;
+	delete spot_lights_ssbo;
 
 	delete model_uniforms_buffer;
 	delete scene_uniforms_buffer;
@@ -915,10 +1043,17 @@ void update(double time) {
 		sphere_position.z = path_origin.z;
 	}
 
-	float aspect_ratio = float(veekay::app.window_width) / float(veekay::app.window_height);
-	SceneUniforms scene_uniforms{
-		.view_projection = camera.view_projection(aspect_ratio),
-	};
+	float aspect = float(veekay::app.window_width) / float(veekay::app.window_height);
+	SceneUniforms scene_uniforms{};
+	scene_uniforms.view_projection = camera.view_projection(aspect);
+	scene_uniforms.camera_position = veekay::vec4{camera.position.x, camera.position.y, camera.position.z, 0.0f};
+
+	// simple directional light: from above and slightly front
+	scene_uniforms.dir_light_dir = veekay::vec4{ normalize(veekay::vec3{0.3f, -1.0f, -0.4f}).x,
+	                                   normalize(veekay::vec3{0.3f, -1.0f, -0.4f}).y,
+	                                   normalize(veekay::vec3{0.3f, -1.0f, -0.4f}).z,
+	                                   0.0f };
+	scene_uniforms.dir_light_color = veekay::vec4{1.0f, 1.0f, 0.9f, 0.6f};
 
 	// Update sphere model transform in models array (sphere placed at last index)
 	if (!models.empty()) {
@@ -933,11 +1068,13 @@ void update(double time) {
 
 	std::vector<ModelUniforms> model_uniforms(models.size());
 	for (size_t i = 0, n = models.size(); i < n; ++i) {
-		const Model& model = models[i];
-		ModelUniforms& uniforms = model_uniforms[i];
-
-		uniforms.model = model.transform.matrix();
-		uniforms.albedo_color = model.albedo_color;
+		const Model &m = models[i];
+		ModelUniforms u{};
+		u.model = m.transform.matrix();
+		u.albedo_color = veekay::vec4{m.albedo_color.x, m.albedo_color.y, m.albedo_color.z, 0.0f};
+		u.specular_color = veekay::vec4{m.specular_color.x, m.specular_color.y, m.specular_color.z, 0.0f};
+		u.misc = veekay::vec4{m.shininess, 0.0f, 0.0f, 0.0f};
+		model_uniforms[i] = u;
 	}
 
 	*(SceneUniforms*)scene_uniforms_buffer->mapped_region = scene_uniforms;
@@ -950,6 +1087,29 @@ void update(double time) {
 
 		char* const pointer = static_cast<char*>(model_uniforms_buffer->mapped_region) + i * alignment;
 		*reinterpret_cast<ModelUniforms*>(pointer) = uniforms;
+	}
+
+	{
+		char* mem = static_cast<char*>(point_lights_ssbo->mapped_region);
+		int* header = reinterpret_cast<int*>(mem);
+		header[0] = num_point_lights;
+		header[1] = header[2] = header[3] = 0;
+		PointLightCPU* pls = reinterpret_cast<PointLightCPU*>(mem + 16);
+		PointLightCPU pl{};
+		pl.pos_int = veekay::vec4{ 0.0f, 3.0f, 0.0f, 2.0f };
+		pl.color_radius = veekay::vec4{ 1.0f, 1.0f, 0.8f, 10.0f };
+		pl.atten = veekay::vec4{ 1.0f, 0.09f, 0.032f, 1.0f };
+		pls[0] = pl;
+		for (uint32_t i = 1; i < 8; ++i) pls[i] = PointLightCPU{};
+	}
+
+	{
+		char* mem = static_cast<char*>(spot_lights_ssbo->mapped_region);
+		int* header = reinterpret_cast<int*>(mem);
+		header[0] = num_spot_lights;
+		header[1] = header[2] = header[3] = 0;
+		SpotLightCPU* sls = reinterpret_cast<SpotLightCPU*>(mem + 16);
+		for (uint32_t i = 0; i < 4; ++i) sls[i] = SpotLightCPU{};
 	}
 }
 
