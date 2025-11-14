@@ -102,6 +102,8 @@ float scale_value = 1.0f;
 float camera_yaw = 0.0f;
 float camera_pitch = 0.0f;
 float camera_distance = 18.0f;
+const float move_speed = 0.1f;
+const float look_sensitivity = 0.0025f;
 
 float current_time = 0.0f;
 
@@ -131,6 +133,12 @@ struct Model {
 	float shininess = 32.0f;
 };
 
+enum class CameraViewMode {
+    LookAt,
+    TransformInverse
+};
+CameraViewMode camera_view_mode = CameraViewMode::LookAt;
+
 struct Camera {
 	constexpr static float default_fov = 60.0f;
 	constexpr static float default_near_plane = 0.01f;
@@ -138,6 +146,9 @@ struct Camera {
 
 	veekay::vec3 position = {};
 	veekay::vec3 rotation = {};
+
+	veekay::vec3 up = {0.0f, 1.0f, 0.0f};
+	veekay::vec3 look_at_center = {0.0f, 0.0f, 0.0f};
 
 	float fov = default_fov;
 	float near_plane = default_near_plane;
@@ -205,53 +216,54 @@ veekay::mat4 Transform::matrix() const {
 	return s * r * t;
 }
 
-veekay::mat4 Camera::view() const {
-	// TODO: Rotation
+veekay::mat4 lookAt(const veekay::vec3& eye, const veekay::vec3& center, const veekay::vec3& up) {
+    veekay::vec3 f = veekay::vec3::normalized(center - eye);
+    veekay::vec3 s = veekay::vec3::normalized(veekay::vec3::cross(f, up));
+    veekay::vec3 u = veekay::vec3::cross(s, f);
 
-	// auto t = veekay::mat4::translation(-position);
-	auto t = veekay::mat4::translation(position);
-	auto rx = veekay::mat4::rotation({1,0,0}, rotation.x);
-	auto ry = veekay::mat4::rotation({0,1,0}, rotation.y);
-	auto rz = veekay::mat4::rotation({0,0,1}, rotation.z);
-	auto cam = t * rz * ry * rx;
-	return veekay::mat4::inverse(cam);
+    veekay::mat4 result = veekay::mat4::identity();
+
+    result.columns[0] = veekay::vec4{ s.x, u.x, -f.x, 0.0f };
+    result.columns[1] = veekay::vec4{ s.y, u.y, -f.y, 0.0f };
+    result.columns[2] = veekay::vec4{ s.z, u.z, -f.z, 0.0f };
+    result.columns[3] = veekay::vec4{
+        -veekay::vec3::dot(s, eye),
+        -veekay::vec3::dot(u, eye),
+         veekay::vec3::dot(f, eye),
+         1.0f
+    };
+
+    return result;
+}
+
+veekay::mat4 Camera::view() const {
+	float cp = cosf(rotation.x);
+	veekay::vec3 forward = { -cp * sinf(rotation.y), sinf(rotation.x), -cp * cosf(rotation.y) };
+    if (camera_view_mode == CameraViewMode::LookAt) {
+        veekay::vec3 center = position + forward;
+        return lookAt(position, center, up);
+    } else {
+        // TransformInverse: строим матрицу трансформации камеры и инвертируем
+
+        veekay::vec3 right = veekay::vec3::normalized(veekay::vec3::cross(forward, up));
+        veekay::vec3 camUp = veekay::vec3::cross(right, forward);
+
+        veekay::mat4 r = veekay::mat4::identity();
+        r.columns[0] = veekay::vec4{ right.x, right.y, right.z, 0.0f };
+        r.columns[1] = veekay::vec4{ camUp.x, camUp.y, camUp.z, 0.0f };
+        r.columns[2] = veekay::vec4{ -forward.x, -forward.y, -forward.z, 0.0f };
+        r.columns[3] = veekay::vec4{ 0.0f, 0.0f, 0.0f, 1.0f };		
+
+        auto t = veekay::mat4::translation(position);
+        auto Mc = r * t;
+        return veekay::mat4::inverse(Mc);
+    }
 }
 
 veekay::mat4 Camera::view_projection(float aspect_ratio) const {
 	auto projection = veekay::mat4::projection(fov, aspect_ratio, near_plane, far_plane);
 
 	return view() * projection;
-}
-
-// Matrix transpose(const Matrix &a) {
-//     Matrix r{};
-//     for (int i = 0; i < 4; ++i) {
-//         for (int j = 0; j < 4; ++j) {
-//             r.m[i][j] = a.m[j][i];
-//         }
-//     }
-//     return r;
-// }
-
-veekay::vec3 cross(const veekay::vec3& a, const veekay::vec3& b) {
-	return {
-		a.y * b.z - a.z * b.y,
-		a.z * b.x - a.x * b.z,
-		a.x * b.y - a.y * b.x
-	};
-}
-
-veekay::vec3 normalize(const veekay::vec3& v) {
-	float length = sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
-	return { v.x / length, v.y / length, v.z / length };
-}
-
-veekay::vec3 add(const veekay::vec3& a, const veekay::vec3& b) {
-	return { a.x + b.x, a.y + b.y, a.z + b.z };
-}
-
-float dot(const veekay::vec3& a, const veekay::vec3& b) {
-    return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
 // Matrix lookAt(const Vector& eye, const Vector& center, const Vector& up) {
@@ -974,6 +986,11 @@ void update(double time) {
 	ImGui::Text("Camera:");
 	ImGui::InputFloat3("Cam position", reinterpret_cast<float*>(&camera.position));
 	ImGui::SliderFloat("FOV", &camera.fov, 10.0f, 120.0f);
+	const char* modes[] = {"LookAt", "TransformInverse"};
+	int selected = (camera_view_mode == CameraViewMode::LookAt) ? 0 : 1;
+	if (ImGui::Combo("Camera mode", &selected, modes, IM_ARRAYSIZE(modes))) {
+		camera_view_mode = (selected == 0) ? CameraViewMode::LookAt : CameraViewMode::TransformInverse;
+	}
 
 	ImGui::Separator();
 	ImGui::Checkbox("Animate path (figure inf sign)", &animate_path);
@@ -985,36 +1002,27 @@ void update(double time) {
 	if (!ImGui::IsWindowHovered()) {
 		using namespace veekay::input;
 
+		float cp = cosf(camera.rotation.x);
+		veekay::vec3 forward = { -cp * sinf(camera.rotation.y), sinf(camera.rotation.x), -cp * cosf(camera.rotation.y) };
+		veekay::vec3 right = veekay::vec3::normalized(veekay::vec3::cross(forward, camera.up));
+		veekay::vec3 up = veekay::vec3::normalized(veekay::vec3::cross(forward, right));
+
+		if (keyboard::isKeyDown(keyboard::Key::w)) camera.position -= forward * move_speed;
+		if (keyboard::isKeyDown(keyboard::Key::s)) camera.position += forward * move_speed;
+		if (keyboard::isKeyDown(keyboard::Key::d)) camera.position += right * move_speed;
+		if (keyboard::isKeyDown(keyboard::Key::a)) camera.position -= right * move_speed;
+		if (keyboard::isKeyDown(keyboard::Key::q)) camera.position += up * move_speed;
+		if (keyboard::isKeyDown(keyboard::Key::z)) camera.position -= up * move_speed;
+
 		if (mouse::isButtonDown(mouse::Button::left)) {
-			auto move_delta = mouse::cursorDelta();
+			auto md = mouse::cursorDelta();
+			camera.rotation.y += float(md.x) * look_sensitivity;
+			camera.rotation.x += float(-md.y) * look_sensitivity;
+			const float limit = 1.49f;
+			if (camera.rotation.x > limit) camera.rotation.x = limit;
+			if (camera.rotation.x < -limit) camera.rotation.x = -limit;
+    	}
 
-			// TODO: Use mouse_delta to update camera rotation
-			
-			auto view = camera.view();
-
-		}
-		// TODO: Calculate right, up and front from view matrix
-		veekay::vec3 right = {1.0f, 0.0f, 0.0f};
-		veekay::vec3 up = {0.0f, -1.0f, 0.0f};
-		veekay::vec3 front = {0.0f, 0.0f, 1.0f};
-
-		if (keyboard::isKeyDown(keyboard::Key::w))
-			camera.position += front * 0.1f;
-
-		if (keyboard::isKeyDown(keyboard::Key::s))
-			camera.position -= front * 0.1f;
-
-		if (keyboard::isKeyDown(keyboard::Key::d))
-			camera.position += right * 0.1f;
-
-		if (keyboard::isKeyDown(keyboard::Key::a))
-			camera.position -= right * 0.1f;
-
-		if (keyboard::isKeyDown(keyboard::Key::q))
-			camera.position += up * 0.1f;
-
-		if (keyboard::isKeyDown(keyboard::Key::z))
-			camera.position -= up * 0.1f;
 	}
 
 	// Sphere animation updates
@@ -1046,12 +1054,13 @@ void update(double time) {
 	float aspect = float(veekay::app.window_width) / float(veekay::app.window_height);
 	SceneUniforms scene_uniforms{};
 	scene_uniforms.view_projection = camera.view_projection(aspect);
-	scene_uniforms.camera_position = veekay::vec4{camera.position.x, camera.position.y, camera.position.z, 0.0f};
+	// scene_uniforms.camera_position = veekay::vec4{camera.position.x, camera.position.y, camera.position.z, 0.0f};
+	scene_uniforms.camera_position = veekay::vec4{camera.position.x, camera.position.y, camera.position.z, 1.0f};
 
 	// simple directional light: from above and slightly front
-	scene_uniforms.dir_light_dir = veekay::vec4{ normalize(veekay::vec3{0.3f, -1.0f, -0.4f}).x,
-	                                   normalize(veekay::vec3{0.3f, -1.0f, -0.4f}).y,
-	                                   normalize(veekay::vec3{0.3f, -1.0f, -0.4f}).z,
+	scene_uniforms.dir_light_dir = veekay::vec4{ veekay::vec3::normalized(veekay::vec3{0.3f, -1.0f, -0.4f}).x,
+	                                   veekay::vec3::normalized(veekay::vec3{0.3f, -1.0f, -0.4f}).y,
+	                                   veekay::vec3::normalized(veekay::vec3{0.3f, -1.0f, -0.4f}).z,
 	                                   0.0f };
 	scene_uniforms.dir_light_color = veekay::vec4{1.0f, 1.0f, 0.9f, 0.6f};
 
