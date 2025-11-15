@@ -88,7 +88,7 @@ struct Mesh {
 
 // Lighting defaults
 int num_point_lights = 1;
-int num_spot_lights = 0;
+int num_spot_lights = 1;
 
 // Sphere / animation globals
 veekay::vec3 sphere_position = {0.0f, -4.0f, 0.0f};
@@ -909,8 +909,8 @@ void initialize(VkCommandBuffer cmd) {
 
 		// One white point light above scene
 		PointLightCPU pl{};
-		pl.pos_int = veekay::vec4{0.0f, 3.0f, 0.0f, 2.0f};
-		pl.color_radius = veekay::vec4{1.0f, 1.0f, 1.0f, 10.0f};
+		pl.pos_int = veekay::vec4{0.0f, -1.0f, 3.0f, 3.6f};
+		pl.color_radius = veekay::vec4{0.26f, 0.36f, 0.95f, 10.0f};
 		pl.atten = veekay::vec4{1.0f, 0.09f, 0.032f, 1.0f};
 		pls[0] = pl;
 
@@ -922,9 +922,18 @@ void initialize(VkCommandBuffer cmd) {
 		int* header = reinterpret_cast<int*>(mem);
 		header[0] = num_spot_lights;
 		header[1] = 0; header[2] = 0; header[3] = 0;
-		// No spot lights by default
 		SpotLightCPU *sls = reinterpret_cast<SpotLightCPU*>(mem + 16);
-		for (uint32_t i = 0; i < 4; ++i) sls[i] = SpotLightCPU{};
+
+		SpotLightCPU sl{};
+		sl.pos_int = veekay::vec4{ -2.0f, -7.0f, -1.0f, 2.0f }; 
+		veekay::vec3 dir = { 0.0f, 1.0f, 0.0f };
+		float innerDeg = 12.0f, outerDeg = 18.0f;
+		sl.dir_inner = veekay::vec4{ dir.x, dir.y, dir.z, cosf(innerDeg * M_PI / 180.0f) };
+		sl.color_outer = veekay::vec4{ 1.0f, 0.0f, 0.0f, cosf(outerDeg * M_PI / 180.0f) };
+		sl.atten = veekay::vec4{1.0f, 0.09f, 0.032f, 1.0f};
+		sls[0] = sl;
+
+		for (uint32_t i = 1; i < 4; ++i) sls[i] = SpotLightCPU{};
 	}
 }
 
@@ -997,6 +1006,76 @@ void update(double time) {
 	ImGui::SliderFloat("Path amp X", &path_amp_x, 0.0f, 10.0f);
 	ImGui::SliderFloat("Path amp Y", &path_amp_y, 0.0f, 5.0f);
 	ImGui::SliderFloat("Path speed", &path_speed, 0.0f, 10.0f);
+
+	ImGui::Separator();
+	// --- Directional light (простая запись в scene_uniforms позже) ---
+	static float dir_dir[3] = {0.3f, -1.0f, -0.4f};
+	static bool dir_enabled = false;
+	static float dir_color[3] = {0.95f, 0.83f, 0.51f};
+	static float dir_intensity = 1.0f;
+	ImGui::InputFloat3("Dir light dir", dir_dir);
+	ImGui::ColorEdit3("Dir light color", dir_color);
+	ImGui::SliderFloat("Dir intensity", &dir_intensity, 0.0f, 5.0f);
+	ImGui::Checkbox("Dir enabled", &dir_enabled);
+
+
+	// --- Point lights: редактируем в-place в SSBO mapped_region ---
+	{
+		char* mem = static_cast<char*>(point_lights_ssbo->mapped_region);
+		int* header = reinterpret_cast<int*>(mem);
+		// header[0] — число источников
+		ImGui::SliderInt("Num Point Lights", &header[0], 0, 8);
+
+		PointLightCPU* pls = reinterpret_cast<PointLightCPU*>(mem + 16);
+
+		int n = header[0];
+		for (int i = 0; i < n; ++i) {
+			ImGui::PushID(i);
+			ImGui::Text("Point %d", i);
+			ImGui::InputFloat3("pos", &pls[i].pos_int.x);               // pos.x,y,z
+			ImGui::SliderFloat("intensity", &pls[i].pos_int.w, 0.0f, 10.0f);
+			ImGui::ColorEdit3("color", &pls[i].color_radius.x);        // color.xyz
+			ImGui::InputFloat("radius", &pls[i].color_radius.w);       // radius in color_radius.w
+			ImGui::InputFloat3("atten (c,l,q)", &pls[i].atten.x);      // atten.x,y,z
+			bool enabled = pls[i].atten.w > 0.5f;
+			if (ImGui::Checkbox("enabled", &enabled)) pls[i].atten.w = enabled ? 1.0f : 0.0f;
+			ImGui::Separator();
+			ImGui::PopID();
+		}
+	}
+
+	// --- Spot lights: тоже редактируем прямо в mapped_region ---
+	{
+		char* mem = static_cast<char*>(spot_lights_ssbo->mapped_region);
+		int* header = reinterpret_cast<int*>(mem);
+		ImGui::SliderInt("Num Spot Lights", &header[0], 0, 4);
+
+		SpotLightCPU* sls = reinterpret_cast<SpotLightCPU*>(mem + 16);
+		int n = header[0];
+		for (int i = 0; i < n; ++i) {
+			ImGui::PushID(100+i);
+			ImGui::Text("Spot %d", i);
+			ImGui::InputFloat3("pos", &sls[i].pos_int.x);
+			ImGui::SliderFloat("intensity", &sls[i].pos_int.w, 0.0f, 10.0f);
+			ImGui::InputFloat3("dir", &sls[i].dir_inner.x); // normalized preferred
+			// Уголы храним в косинусах в dir_inner.w и color_outer.w — но в UI удобнее градусы:
+			float innerDeg = acosf(sls[i].dir_inner.w) * 180.0f / M_PI;
+			float outerDeg = acosf(sls[i].color_outer.w) * 180.0f / M_PI;
+			if (ImGui::SliderFloat("inner deg", &innerDeg, 0.0f, 90.0f)) {
+				sls[i].dir_inner.w = cosf(innerDeg * M_PI / 180.0f);
+			}
+			if (ImGui::SliderFloat("outer deg", &outerDeg, 0.0f, 90.0f)) {
+				sls[i].color_outer.w = cosf(outerDeg * M_PI / 180.0f);
+			}
+			ImGui::ColorEdit3("color", &sls[i].color_outer.x);
+			ImGui::InputFloat3("atten (c,l,q)", &sls[i].atten.x);
+			bool enabled = sls[i].atten.w > 0.5f;
+			if (ImGui::Checkbox("enabled", &enabled)) sls[i].atten.w = enabled ? 1.0f : 0.0f;
+			ImGui::Separator();
+			ImGui::PopID();
+		}
+	}
+
 	ImGui::End();
 
 	if (!ImGui::IsWindowHovered()) {
@@ -1058,11 +1137,12 @@ void update(double time) {
 	scene_uniforms.camera_position = veekay::vec4{camera.position.x, camera.position.y, camera.position.z, 1.0f};
 
 	// simple directional light: from above and slightly front
-	scene_uniforms.dir_light_dir = veekay::vec4{ veekay::vec3::normalized(veekay::vec3{0.3f, -1.0f, -0.4f}).x,
-	                                   veekay::vec3::normalized(veekay::vec3{0.3f, -1.0f, -0.4f}).y,
-	                                   veekay::vec3::normalized(veekay::vec3{0.3f, -1.0f, -0.4f}).z,
-	                                   0.0f };
-	scene_uniforms.dir_light_color = veekay::vec4{1.0f, 1.0f, 0.9f, 0.6f};
+	scene_uniforms.dir_light_dir = veekay::vec4{ veekay::vec3::normalized({dir_dir[0], dir_dir[1], dir_dir[2]}).x,
+                                            veekay::vec3::normalized({dir_dir[0], dir_dir[1], dir_dir[2]}).y,
+                                            veekay::vec3::normalized({dir_dir[0], dir_dir[1], dir_dir[2]}).z,
+                                            dir_enabled ? 1.0f : 0.0f };
+	scene_uniforms.dir_light_color = veekay::vec4{ dir_color[0], dir_color[1], dir_color[2], dir_intensity };
+
 
 	// Update sphere model transform in models array (sphere placed at last index)
 	if (!models.empty()) {
@@ -1098,28 +1178,28 @@ void update(double time) {
 		*reinterpret_cast<ModelUniforms*>(pointer) = uniforms;
 	}
 
-	{
-		char* mem = static_cast<char*>(point_lights_ssbo->mapped_region);
-		int* header = reinterpret_cast<int*>(mem);
-		header[0] = num_point_lights;
-		header[1] = header[2] = header[3] = 0;
-		PointLightCPU* pls = reinterpret_cast<PointLightCPU*>(mem + 16);
-		PointLightCPU pl{};
-		pl.pos_int = veekay::vec4{ 0.0f, 3.0f, 0.0f, 2.0f };
-		pl.color_radius = veekay::vec4{ 1.0f, 1.0f, 0.8f, 10.0f };
-		pl.atten = veekay::vec4{ 1.0f, 0.09f, 0.032f, 1.0f };
-		pls[0] = pl;
-		for (uint32_t i = 1; i < 8; ++i) pls[i] = PointLightCPU{};
-	}
+	// {
+	// 	char* mem = static_cast<char*>(point_lights_ssbo->mapped_region);
+	// 	int* header = reinterpret_cast<int*>(mem);
+	// 	header[0] = num_point_lights;
+	// 	header[1] = header[2] = header[3] = 0;
+	// 	PointLightCPU* pls = reinterpret_cast<PointLightCPU*>(mem + 16);
+	// 	PointLightCPU pl{};
+	// 	pl.pos_int = veekay::vec4{ 0.0f, 3.0f, 0.0f, 2.0f };
+	// 	pl.color_radius = veekay::vec4{ 1.0f, 1.0f, 0.8f, 10.0f };
+	// 	pl.atten = veekay::vec4{ 1.0f, 0.09f, 0.032f, 1.0f };
+	// 	pls[0] = pl;
+	// 	for (uint32_t i = 1; i < 8; ++i) pls[i] = PointLightCPU{};
+	// }
 
-	{
-		char* mem = static_cast<char*>(spot_lights_ssbo->mapped_region);
-		int* header = reinterpret_cast<int*>(mem);
-		header[0] = num_spot_lights;
-		header[1] = header[2] = header[3] = 0;
-		SpotLightCPU* sls = reinterpret_cast<SpotLightCPU*>(mem + 16);
-		for (uint32_t i = 0; i < 4; ++i) sls[i] = SpotLightCPU{};
-	}
+	// {
+	// 	char* mem = static_cast<char*>(spot_lights_ssbo->mapped_region);
+	// 	int* header = reinterpret_cast<int*>(mem);
+	// 	header[0] = num_spot_lights;
+	// 	header[1] = header[2] = header[3] = 0;
+	// 	SpotLightCPU* sls = reinterpret_cast<SpotLightCPU*>(mem + 16);
+	// 	for (uint32_t i = 0; i < 4; ++i) sls[i] = SpotLightCPU{};
+	// }
 }
 
 void render(VkCommandBuffer cmd, VkFramebuffer framebuffer) {
