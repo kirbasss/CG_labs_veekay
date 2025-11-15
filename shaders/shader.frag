@@ -82,16 +82,18 @@ void main() {
 
 	// directional light
 	{
-		vec3 Ldir = normalize(dir_light_dir.xyz);
-		float intensity = dir_light_color.w;
-		vec3 lightCol = dir_light_color.xyz;
+		if (dir_light_dir.w > 0.5) {
+			vec3 Ldir = normalize(dir_light_dir.xyz);
+			float intensity = dir_light_color.w;
+			vec3 lightCol = dir_light_color.xyz;
 
-		float NdotL = max(dot(N, Ldir), 0.0);
-		vec3 H = normalize(Ldir + V);
-		float NdotH = max(dot(N, H), 0.0);
-		vec3 diff = albedo * NdotL;
-		vec3 spec = specColor * pow(NdotH, shininess);
-		color += (diff + spec) * lightCol * intensity;
+			float NdotL = max(dot(N, Ldir), 0.0);
+			vec3 H = normalize(Ldir + V);
+			float NdotH = max(dot(N, H), 0.0);
+			vec3 diff = albedo * NdotL;
+			vec3 spec = specColor * pow(NdotH, shininess);
+			color += (diff + spec) * lightCol * intensity;
+		}
 	}
 
 	// point light
@@ -106,6 +108,12 @@ void main() {
 
 		vec3 Ldir = normalize(lp - f_position);
 		float att = calcAttenuation(lp, f_position, attenParams);
+		float maxRadius = pl.color_radius.w;
+		if (maxRadius > 0.001) {
+			float d = length(lp - f_position);
+			float radial = clamp(1.0 - (d / maxRadius), 0.0, 1.0);
+			att *= radial;
+		}
 
 		vec3 contrib = blinnPhong(N, V, Ldir, lightCol, intensity, albedo, specColor, shininess);
 		color += contrib * att;
