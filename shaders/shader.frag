@@ -12,6 +12,7 @@ layout (binding = 0, std140) uniform SceneUniforms {
 	vec4 camera_position;
 	vec4 dir_light_dir;
 	vec4 dir_light_color;
+	float time;
 };
 
 layout (binding = 1, std140) uniform ModelUniforms {
@@ -20,6 +21,11 @@ layout (binding = 1, std140) uniform ModelUniforms {
 	vec4 specular_color;
 	vec4 misc;
 };
+
+// per-material samplers (set = 1)
+layout (set = 1, binding = 0) uniform sampler2D u_albedo;
+layout (set = 1, binding = 1) uniform sampler2D u_specular;
+layout (set = 1, binding = 2) uniform sampler2D u_emissive;
 
 struct PointLight {
     vec4 pos_int;
@@ -66,19 +72,78 @@ vec3 blinnPhong(vec3 N, vec3 V, vec3 Ldir, vec3 lightColor, float intensity, vec
     float NdotH = max(dot(N, H), 0.0);
     float specFactor = pow(NdotH, shininess);
     vec3 specular = specColor * specFactor;
+	// specular *= 1.5f;
 
     return (diffuse + specular) * lightColor * intensity;
 }
 
-void main() {
-	vec3 albedo = albedo_color.xyz * f_color;
-	vec3 specColor = specular_color.xyz;
-	float shininess = misc.x;
+// simple pseudo-random for lava jitter (not high quality noise, but ok)
+float prand(vec2 co) {
+    // classic hash
+    float t = dot(co, vec2(12.9898,78.233));
+    return fract(sin(t) * 43758.5453);
+}
 
+void main() {
+	// pull misc
+	float shininess = misc.x;
+	float emissiveStrength = misc.y;
+	float opacity = misc.z;
+	float specScale = misc.w;
+
+	// base normal/view
 	vec3 N = normalize(f_normal);
 	vec3 V = normalize(camera_position.xyz - f_position);
 
-	vec3 color = vec3(0.03) * albedo;
+	// Animated UV per-material: choose behavior by material flags encoded in shininess sign or another convention:
+	// We'll use conventions:
+	//  - water: shininess > 0 and shininess < 1000 (normal)
+	//  - lava: we will set specScale negative in C++ to indicate "lava" style.
+	// To keep it robust, we'll detect lava by specScale < 0.0.
+	vec2 uv = f_uv;
+	bool isLavaJitter = specScale < 0.0;
+	bool isWaterSmooth = !isLavaJitter;
+
+	float t = time;
+
+	// animated UVs
+	if (isWaterSmooth) {
+		// slow smooth flow sin/cos offset
+		vec2 flow = vec2(sin(t * 0.35), cos(t * 0.27)) * 0.02;
+		uv += flow;
+	} else {
+		// lava: slow drift + jittering patches that appear/disappear
+		// base drift:
+		uv += vec2(t * 0.05, -t * 0.02);
+
+		// jitter: small cellular-like perturbation based on prand
+		vec2 cell = floor(uv * 6.0); // cells
+		float cellNoise = prand(cell + floor(t * 0.4));
+		// make jitter stronger in some cells
+		vec2 jitter = vec2(prand(cell + 1.23), prand(cell + 7.89)) - 0.5;
+		uv += jitter * (cellNoise * 0.12);
+	}
+
+	vec4 albedoSample = texture(u_albedo, uv);
+	vec3 texAlbedo = albedoSample.bgr;
+	vec3 texSpec = texture(u_specular, f_uv).bgr;
+	vec3 emissiveCol = texture(u_emissive, f_uv).bgr;
+	float emissiveAlpha = texture(u_emissive, f_uv).a;
+
+	vec3 albedo = texAlbedo * albedo_color.xyz * f_color;
+
+	float specTexIntensity = (texSpec.r + texSpec.g + texSpec.b) / 3.0;
+	vec3 specColor = specular_color.xyz * specTexIntensity * abs(specScale);
+	float maxSpec = 1.5;
+	if (isLavaJitter) {
+		// for lava we want to limit shiny hotspots: reduce scale and clamp
+		specColor *= 0.6;
+		maxSpec = 0.6;
+	}
+	specColor = clamp(specColor, vec3(0.0), vec3(maxSpec));
+
+    vec3 ambient = vec3(0.01);
+    vec3 color = ambient * albedo;
 
 	// directional light
 	{
@@ -140,6 +205,14 @@ void main() {
 		vec3 contrib = blinnPhong(N, V, Ldir, lightCol, intensity, albedo, specColor, shininess);
 		color += contrib * att * spot;
 	}
+
+	// emissive contribution
+	if (emissiveAlpha > 0.0001 && emissiveStrength > 0.0001) {
+		vec3 e = emissiveCol * emissiveStrength * emissiveAlpha;
+		color += e;
+	}
+
+	float finalAlpha = opacity * albedoSample.a;
 
 	color = max(color, vec3(0.0));
 	color = min(color, vec3(1.0));
