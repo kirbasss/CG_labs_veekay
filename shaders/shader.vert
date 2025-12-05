@@ -2,12 +2,12 @@
 
 layout (location = 0) in vec3 v_position;
 layout (location = 1) in vec3 v_normal;
-layout (location = 2) in vec2 v_uv;
+layout (location = 2) in vec2 f_uv;
 layout (location = 3) in vec3 v_color;
 
 layout (location = 0) out vec3 f_position;
 layout (location = 1) out vec3 f_normal;
-layout (location = 2) out vec2 f_uv;
+layout (location = 2) out vec2 v_uv;
 layout (location = 3) out vec3 f_color;
 
 layout (binding = 0, std140) uniform SceneUniforms {
@@ -22,6 +22,7 @@ layout (binding = 1, std140) uniform ModelUniforms {
 	vec4 albedo_color;
 	vec4 specular_color;
 	vec4 misc;
+	vec4 uv_scale_offset; // xy scale, zw offset
 };
 
 void main() {
@@ -35,6 +36,7 @@ void main() {
 
 	f_position = position.xyz;
 	f_normal = world_normal.xyz;
-	f_uv = v_uv;
+	vec2 scaledUV = f_uv * uv_scale_offset.xy + uv_scale_offset.zw;
+	v_uv = scaledUV;
 	f_color = v_color;
 }
