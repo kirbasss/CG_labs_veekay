@@ -2,7 +2,7 @@
 
 layout (location = 0) in vec3 f_position;
 layout (location = 1) in vec3 f_normal;
-layout (location = 2) in vec2 f_uv;
+layout (location = 2) in vec2 v_uv;
 layout (location = 3) in vec3 f_color;
 
 layout (location = 0) out vec4 final_color;
@@ -26,6 +26,9 @@ layout (binding = 1, std140) uniform ModelUniforms {
 layout (set = 1, binding = 0) uniform sampler2D u_albedo;
 layout (set = 1, binding = 1) uniform sampler2D u_specular;
 layout (set = 1, binding = 2) uniform sampler2D u_emissive;
+layout (set = 1, binding = 3, std140) uniform MaterialParams {
+    vec4 extra; // x = scrollEnabled, y = speed, z = dir.x, w = dir.y
+};
 
 struct PointLight {
     vec4 pos_int;
@@ -64,7 +67,7 @@ float calcAttenuation(vec3 lightPos, vec3 fragPos, vec3 attenParams) {
     return 1.0 / max(0.0001, constant + linear * dist + quadratic * dist * dist);
 }
 
-vec3 blinnPhong(vec3 N, vec3 V, vec3 Ldir, vec3 lightColor, float intensity, vec3 albedo, vec3 specColor, float shininess) {
+vec3 blinnPhong(vec3 N, vec3 V, vec3 Ldir, vec3 lightColor, float intensity, vec3 albedo, vec3 specColor, float shininess, float specularScale, vec3 texSpec) {
     float NdotL = max(dot(N, Ldir), 0.0);
     vec3 diffuse = albedo * NdotL;
 
@@ -72,150 +75,105 @@ vec3 blinnPhong(vec3 N, vec3 V, vec3 Ldir, vec3 lightColor, float intensity, vec
     float NdotH = max(dot(N, H), 0.0);
     float specFactor = pow(NdotH, shininess);
     vec3 specular = specColor * specFactor;
-	// specular *= 1.5f;
+	specular *= specularScale;
+
+    // specular material
+    float mask = dot(texSpec, vec3(0.333));
+    specular *= mask;
 
     return (diffuse + specular) * lightColor * intensity;
 }
 
-// simple pseudo-random for lava jitter (not high quality noise, but ok)
-float prand(vec2 co) {
-    // classic hash
-    float t = dot(co, vec2(12.9898,78.233));
-    return fract(sin(t) * 43758.5453);
-}
-
 void main() {
-	// pull misc
-	float shininess = misc.x;
-	float emissiveStrength = misc.y;
-	float opacity = misc.z;
-	float specScale = misc.w;
+    vec3 albedo = albedo_color.xyz * f_color;
+    vec3 specColor = specular_color.xyz;
+    float shininess = misc.x;
+    float emissiveStrength = misc.y;
+    float opacity = misc.z;
+    float specularScale = misc.w;
 
-	// base normal/view
-	vec3 N = normalize(f_normal);
-	vec3 V = normalize(camera_position.xyz - f_position);
+    vec3 N = normalize((mat3(model) * f_normal));
+    vec3 worldPos = (model * vec4(f_position, 1.0)).xyz;
+    vec3 V = normalize(camera_position.xyz - worldPos);
 
-	// Animated UV per-material: choose behavior by material flags encoded in shininess sign or another convention:
-	// We'll use conventions:
-	//  - water: shininess > 0 and shininess < 1000 (normal)
-	//  - lava: we will set specScale negative in C++ to indicate "lava" style.
-	// To keep it robust, we'll detect lava by specScale < 0.0.
-	vec2 uv = f_uv;
-	bool isLavaJitter = specScale < 0.0;
-	bool isWaterSmooth = !isLavaJitter;
+    // compute UV with optional continuous offset (uses sampler addressing mode for mirrored repeat)
+    vec2 uv = v_uv;
+    if (extra.x > 0.5) {
+        vec2 dir = extra.zw;
+        float speed = extra.y;
+        vec2 offs = dir * (speed * time);
+        uv += offs;
+    }
 
-	float t = time;
+    // sample textures from material set
+    vec3 texAlbedo = texture(u_albedo, uv).bgr;
+    vec3 texSpec   = texture(u_specular, uv).bgr;
+    vec3 texEmiss  = texture(u_emissive, uv).bgr;
 
-	// animated UVs
-	if (isWaterSmooth) {
-		// slow smooth flow sin/cos offset
-		vec2 flow = vec2(sin(t * 0.35), cos(t * 0.27)) * 0.02;
-		uv += flow;
-	} else {
-		// lava: slow drift + jittering patches that appear/disappear
-		// base drift:
-		uv += vec2(t * 0.05, -t * 0.02);
+    // combine albedo
+    vec3 baseAlbedo = albedo * texAlbedo;
 
-		// jitter: small cellular-like perturbation based on prand
-		vec2 cell = floor(uv * 6.0); // cells
-		float cellNoise = prand(cell + floor(t * 0.4));
-		// make jitter stronger in some cells
-		vec2 jitter = vec2(prand(cell + 1.23), prand(cell + 7.89)) - 0.5;
-		uv += jitter * (cellNoise * 0.12);
-	}
+    vec3 color = vec3(0.03) * baseAlbedo;
 
-	vec4 albedoSample = texture(u_albedo, uv);
-	vec3 texAlbedo = albedoSample.bgr;
-	vec3 texSpec = texture(u_specular, f_uv).bgr;
-	vec3 emissiveCol = texture(u_emissive, f_uv).bgr;
-	float emissiveAlpha = texture(u_emissive, f_uv).a;
+    // directional light
+    if (dir_light_dir.w > 0.5) {
+        vec3 Ldir = normalize(dir_light_dir.xyz);
+        float intensity = dir_light_color.w;
+        vec3 lightCol = dir_light_color.xyz;
 
-	vec3 albedo = texAlbedo * albedo_color.xyz * f_color;
+        color += blinnPhong(N, V, Ldir, lightCol, intensity, baseAlbedo, specColor, shininess, specularScale, texSpec);
+    }
 
-	float specTexIntensity = (texSpec.r + texSpec.g + texSpec.b) / 3.0;
-	vec3 specColor = specular_color.xyz * specTexIntensity * abs(specScale);
-	float maxSpec = 1.5;
-	if (isLavaJitter) {
-		// for lava we want to limit shiny hotspots: reduce scale and clamp
-		specColor *= 0.6;
-		maxSpec = 0.6;
-	}
-	specColor = clamp(specColor, vec3(0.0), vec3(maxSpec));
+    // point lights
+    for (int i = 0; i < numPointLights; ++i) {
+        PointLight pl = pointLights[i];
+        if (pl.atten.w < 0.5) continue;
 
-    vec3 ambient = vec3(0.01);
-    vec3 color = ambient * albedo;
+        vec3 lp = pl.pos_int.xyz;
+        float intensity = pl.pos_int.w;
+        vec3 lightCol = pl.color_radius.xyz;
+        vec3 attenParams = pl.atten.xyz;
 
-	// directional light
-	{
-		if (dir_light_dir.w > 0.5) {
-			vec3 Ldir = normalize(dir_light_dir.xyz);
-			float intensity = dir_light_color.w;
-			vec3 lightCol = dir_light_color.xyz;
+        vec3 Ldir = normalize(lp - worldPos);
+        float att = calcAttenuation(lp, worldPos, attenParams);
+        float maxRadius = pl.color_radius.w;
+        if (maxRadius > 0.001) {
+            float d = length(lp - worldPos);
+            float radial = clamp(1.0 - (d / maxRadius), 0.0, 1.0);
+            att *= radial;
+        }
 
-			float NdotL = max(dot(N, Ldir), 0.0);
-			vec3 H = normalize(Ldir + V);
-			float NdotH = max(dot(N, H), 0.0);
-			vec3 diff = albedo * NdotL;
-			vec3 spec = specColor * pow(NdotH, shininess);
-			color += (diff + spec) * lightCol * intensity;
-		}
-	}
+        vec3 contrib = blinnPhong(N, V, Ldir, lightCol, intensity, baseAlbedo, specColor, shininess, specularScale, texSpec);
+        color += contrib * att;
+    }
 
-	// point light
-	for (int i = 0; i < numPointLights; ++i) {
-		PointLight pl = pointLights[i];
-		if (pl.atten.w < 0.5) continue;
+    // spot lights
+    for (int i = 0; i < numSpotLights; ++i) {
+        SpotLight s = spotLights[i];
+        if (s.atten.w < 0.5) continue;
 
-		vec3 lp = pl.pos_int.xyz;
-		float intensity = pl.pos_int.w;
-		vec3 lightCol = pl.color_radius.xyz;
-		vec3 attenParams = pl.atten.xyz;
+        vec3 lp = s.pos_int.xyz;
+        float intensity = s.pos_int.w;
+        vec3 lightCol = s.color_outer.xyz;
+        vec3 dir = normalize(s.dir_inner.xyz);
+        float innerCos = s.dir_inner.w;
+        float outerCos = s.color_outer.w;
+        vec3 attenParams = s.atten.xyz;
 
-		vec3 Ldir = normalize(lp - f_position);
-		float att = calcAttenuation(lp, f_position, attenParams);
-		float maxRadius = pl.color_radius.w;
-		if (maxRadius > 0.001) {
-			float d = length(lp - f_position);
-			float radial = clamp(1.0 - (d / maxRadius), 0.0, 1.0);
-			att *= radial;
-		}
+        vec3 Ldir = normalize(lp - worldPos);
+        float theta = dot(-dir, Ldir);
+        float spot = smoothstep(outerCos, innerCos, theta);
+        float att = calcAttenuation(lp, worldPos, attenParams);
 
-		vec3 contrib = blinnPhong(N, V, Ldir, lightCol, intensity, albedo, specColor, shininess);
-		color += contrib * att;
-	}
+        vec3 contrib = blinnPhong(N, V, Ldir, lightCol, intensity, baseAlbedo, specColor, shininess, specularScale, texSpec);
+        color += contrib * att * spot;
+    }
 
-	// spot lights
-	for (int i = 0; i < numSpotLights; ++i) {
-		SpotLight s = spotLights[i];
-		if (s.atten.w < 0.5) continue;
+    // emissive
+    color += texEmiss * emissiveStrength;
 
-		vec3 lp = s.pos_int.xyz;
-		float intensity = s.pos_int.w;
-		vec3 lightCol = s.color_outer.xyz;
-		vec3 dir = normalize(s.dir_inner.xyz);
-		float innerCos = s.dir_inner.w;
-		float outerCos = s.color_outer.w;
-		vec3 attenParams = s.atten.xyz;
+    color = max(color, vec3(0.0));
+    color = min(color, vec3(1.0));
 
-		vec3 Ldir = normalize(lp - f_position);
-		float theta = dot(-dir, Ldir);
-		float spot = smoothstep(outerCos, innerCos, theta);
-		float att = calcAttenuation(lp, f_position, attenParams);
-
-		vec3 contrib = blinnPhong(N, V, Ldir, lightCol, intensity, albedo, specColor, shininess);
-		color += contrib * att * spot;
-	}
-
-	// emissive contribution
-	if (emissiveAlpha > 0.0001 && emissiveStrength > 0.0001) {
-		vec3 e = emissiveCol * emissiveStrength * emissiveAlpha;
-		color += e;
-	}
-
-	float finalAlpha = opacity * albedoSample.a;
-
-	color = max(color, vec3(0.0));
-	color = min(color, vec3(1.0));
-
-	final_color = vec4(color, 1.0f);
+    final_color = vec4(color, opacity);
 }

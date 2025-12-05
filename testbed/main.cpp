@@ -45,6 +45,12 @@ struct ModelUniforms {
 	veekay::vec4 albedo_color;
 	veekay::vec4 specular_color;
 	veekay::vec4 misc; // misc.x = shininess; misc.y = emissiveStrength; misc.z = opacity; misc.w = specularScale/flag
+	veekay::vec4 uv_scale_offset; // xy = uv scale, zw = uv offset
+};
+
+// Per-material params (std140, binding = 3 in material set)
+struct MaterialParams {
+	veekay::vec4 extra; // x = scrollEnabled (1/0), y = scrollSpeed (uv/sec), z = dir.x, w = dir.y
 };
 
 // std430 PointLight layout (binding = 2)
@@ -85,7 +91,7 @@ veekay::vec3 sphere_position = {0.0f, -4.0f, 0.0f};
 float sphere_rotation = 0.0f;
 veekay::vec3 sphere_color = {0.7f, 0.2f, 0.924f};
 bool sphere_spin = false;
-float puls_amp = 0.3f;
+float puls_amp = 0.0f;
 float puls_freq = 1.5f;
 float scale_value = 1.0f;
 
@@ -204,6 +210,7 @@ inline namespace {
 	// VkSampler texture_sampler;
 	// shared sampler used for materials
 	VkSampler material_sampler = VK_NULL_HANDLE;
+	VkSampler material_sampler_mirrored = VK_NULL_HANDLE;
 
 	// helper container for textures/materials
 	struct Material {
@@ -211,8 +218,12 @@ inline namespace {
 		veekay::graphics::Texture* specular = nullptr;
 		veekay::graphics::Texture* emissive = nullptr;
 		VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+		bool use_mirrored = false;
 	};
 	std::vector<Material> materials;
+
+	// per-material UBOs
+	std::vector<veekay::graphics::Buffer*> material_param_ubos;
 }
 
 static veekay::graphics::Texture* loadTextureFromPNG(VkCommandBuffer cmd, const char* path) {
@@ -578,6 +589,7 @@ void initialize(VkCommandBuffer cmd) {
 				{ 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // albedo
 				{ 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // specular
 				{ 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // emissive
+				{ 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }, // MaterialParams
 			};
 			VkDescriptorSetLayoutCreateInfo info{ .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
 				.bindingCount = (uint32_t)(sizeof(mbindings)/sizeof(mbindings[0])),
@@ -713,6 +725,9 @@ void initialize(VkCommandBuffer cmd) {
 			0xFF000000, 0xFF000000,
 			0xFF000000, 0xFF000000,
 		};
+		// Для жестких бликов нужна белая заглушка
+		// 0xFFFFFFFF, 0xFFFFFFFF,
+		// 0xFFFFFFFF, 0xFFFFFFFF,
 		empty_specular = new veekay::graphics::Texture(cmd, 2, 2,
 			VK_FORMAT_B8G8R8A8_UNORM, emptySpecPixels);
 
@@ -731,17 +746,29 @@ void initialize(VkCommandBuffer cmd) {
 			VK_FORMAT_B8G8R8A8_UNORM, emptyEmissivePixels);
 	}
 
-	// shared material sampler (can be configured)
+	// shared material sampler
 	{
 		VkSamplerCreateInfo sInfo{};
 		sInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-		sInfo.magFilter = VK_FILTER_LINEAR;
-		sInfo.minFilter = VK_FILTER_LINEAR;
+		sInfo.magFilter = VK_FILTER_NEAREST;
+		sInfo.minFilter = VK_FILTER_NEAREST;
 		sInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		sInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		sInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
 		if (vkCreateSampler(device, &sInfo, nullptr, &material_sampler) != VK_SUCCESS) {
 			std::cerr << "Failed to create material sampler\n";
+			veekay::app.running = false;
+			return;
+		}
+
+		VkSamplerCreateInfo sInfoMir = sInfo;
+		sInfoMir.magFilter = VK_FILTER_LINEAR;
+		sInfoMir.minFilter = VK_FILTER_LINEAR;
+		sInfoMir.addressModeU = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		sInfoMir.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		sInfoMir.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+		if (vkCreateSampler(device, &sInfoMir, nullptr, &material_sampler_mirrored) != VK_SUCCESS) {
+			std::cerr << "Failed to create mirrored sampler\n";
 			veekay::app.running = false;
 			return;
 		}
@@ -823,14 +850,16 @@ void initialize(VkCommandBuffer cmd) {
 		if (!materials[0].albedo) materials[0].albedo = missing_texture;
 		materials[0].specular = empty_specular;
 		materials[0].emissive = empty_emissive;
+		materials[0].use_mirrored = false;
 
 		// material 1 - lava (albedo + emissive)
 		materials[1].albedo = loadTextureFromPNG(cmd, "./assets/lava.png");
 		if (!materials[1].albedo) materials[1].albedo = missing_texture;
-		materials[1].specular = loadTextureFromPNG(cmd, "./assets/lava_spec.png");
-		if (!materials[1].specular) materials[1].specular = empty_specular;
+		// materials[1].specular = loadTextureFromPNG(cmd, "./assets/lava_spec.png");
+		materials[1].specular = empty_specular;
 		materials[1].emissive = loadTextureFromPNG(cmd, "./assets/lava_emissive.png");
 		if (!materials[1].emissive) materials[1].emissive = empty_emissive;
+		materials[1].use_mirrored = true;
 
 		// material 2 - water (albedo + specular)
 		materials[2].albedo = loadTextureFromPNG(cmd, "./assets/water.png");
@@ -838,22 +867,69 @@ void initialize(VkCommandBuffer cmd) {
 		materials[2].specular = loadTextureFromPNG(cmd, "./assets/water_spec.png");
 		if (!materials[2].specular) materials[2].specular = empty_specular;
 		materials[2].emissive = empty_emissive;
+		materials[2].use_mirrored = true;
 
 		// ... other materials left as default missing_texture
 		for (uint32_t i = 3; i < MAX_MATERIALS; ++i) {
 			materials[i].albedo = missing_texture;
 			materials[i].specular = empty_specular;
 			materials[i].emissive = empty_emissive;
+			materials[i].use_mirrored = false;
+		}
+	}
+
+	// allocate per-material UBOs and fill defaults
+	{
+		material_param_ubos.resize(MAX_MATERIALS, nullptr);
+		size_t matParamsSize = veekay::graphics::Buffer::structureAlignment(sizeof(MaterialParams));
+		for (uint32_t i = 0; i < MAX_MATERIALS; ++i) {
+			material_param_ubos[i] = new veekay::graphics::Buffer(matParamsSize, nullptr, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+			MaterialParams mp{};
+			mp.extra = veekay::vec4{0.0f, 0.0f, 1.0f, 0.0f}; // disabled by default, dir=(1,0)
+			// enable scrolling
+			if (i == 1) {
+				mp.extra.x = 1.0f;    // enabled
+				mp.extra.y = 0.035f;   // speed (uv/sec) — tweak to taste
+				mp.extra.z = 0.0f;    // dir.x
+				mp.extra.w = -1.0f;   // dir.y (move down)
+			}
+			if (i == 2) {
+				mp.extra.x = 1.0f;
+				mp.extra.y = 0.3f;
+				mp.extra.z = 0.0f;   
+				mp.extra.w = -1.0f;  
+			}
+			char* mem = static_cast<char*>(material_param_ubos[i]->mapped_region);
+			*reinterpret_cast<MaterialParams*>(mem) = mp;
 		}
 	}
 
 	// Update each material's descriptor set (set = 1)
 	for (uint32_t i = 0; i < MAX_MATERIALS; ++i) {
-		VkDescriptorImageInfo albedoInfo{ .sampler = material_sampler, .imageView = materials[i].albedo->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-		VkDescriptorImageInfo specInfo{ .sampler = material_sampler, .imageView = materials[i].specular->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-		VkDescriptorImageInfo emissiveInfo{ .sampler = material_sampler, .imageView = materials[i].emissive->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		// choose sampler for albedo (usually the shared material sampler or mirrored)
+		VkSampler albedoSampler = materials[i].use_mirrored ? material_sampler_mirrored : material_sampler;
 
-		VkWriteDescriptorSet writes[3]{};
+		VkSampler specSampler = material_sampler;
+		if (materials[i].specular == empty_specular) {
+			specSampler = empty_specular_sampler;
+		} else if (materials[i].use_mirrored) {
+			specSampler = material_sampler_mirrored;
+		}
+
+		VkSampler emissiveSampler = material_sampler;
+		if (materials[i].emissive == empty_emissive) {
+			emissiveSampler = empty_emissive_sampler;
+		} else if (materials[i].use_mirrored) {
+			emissiveSampler = material_sampler_mirrored;
+		}
+
+		VkDescriptorImageInfo albedoInfo{ .sampler = albedoSampler, .imageView = materials[i].albedo->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		VkDescriptorImageInfo specInfo{   .sampler = specSampler,   .imageView = materials[i].specular->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+		VkDescriptorImageInfo emissiveInfo{.sampler = emissiveSampler,.imageView = materials[i].emissive->view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+
+		VkDescriptorBufferInfo paramsInfo{ .buffer = material_param_ubos[i]->buffer, .offset = 0, .range = sizeof(MaterialParams) };
+
+		VkWriteDescriptorSet writes[4]{};
 		writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writes[0].dstSet = material_descriptor_sets[i];
 		writes[0].dstBinding = 0;
@@ -869,11 +945,18 @@ void initialize(VkCommandBuffer cmd) {
 		writes[2].dstBinding = 2;
 		writes[2].pImageInfo = &emissiveInfo;
 
-		vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+		writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[3].dstSet = material_descriptor_sets[i];
+		writes[3].dstBinding = 3;
+		writes[3].descriptorCount = 1;
+		writes[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		writes[3].pBufferInfo = &paramsInfo;
 
-		// store descriptor_set in our helper list too
+		vkUpdateDescriptorSets(device, 4, writes, 0, nullptr);
+
 		materials[i].descriptor_set = material_descriptor_sets[i];
 	}
+
 
 	// NOTE: Plane mesh initialization
 	{
@@ -1033,7 +1116,7 @@ void initialize(VkCommandBuffer cmd) {
 	models.emplace_back(Model{
 		.mesh = cube_mesh,
 		.transform = Transform{
-			.position = {-2.0f, -0.5f, -1.5f},
+			.position = {0.0f, -0.5f, -0.5f},
 		},
 		.albedo_color = veekay::vec3{1.0f, 1.0f, 1.0f},
 		.material_id = 0, // obsidian
@@ -1045,24 +1128,24 @@ void initialize(VkCommandBuffer cmd) {
 	models.emplace_back(Model{
 		.mesh = cube_mesh,
 		.transform = Transform{
-			.position = {1.5f, -0.5f, -0.5f},
+			.position = {1.0f, -0.5f, -0.5f},
 		},
 		.albedo_color = veekay::vec3{1.0f, 1.0f, 1.0f},
 		.material_id = 1, // lava
-		.emissive_strength = 1.0f,
+		.emissive_strength = 0.7f,
 		.opacity = 1.0f,
-		.specular_scale = -1.0f
+		.specular_scale = 0.5f
 	});
 
 	models.emplace_back(Model{
 		.mesh = cube_mesh,
 		.transform = Transform{
-			.position = {0.0f, -0.5f, 1.0f},
+			.position = {-1.0f, -0.5f, -0.5f},
 		},
 		.albedo_color = veekay::vec3{1.0f, 1.0f, 1.0f},
 		.material_id = 2, // water
 		.emissive_strength = 0.0f,
-		.opacity = 0.55f,    // semi transparent
+		.opacity = 0.5f,    // semi transparent
 		.specular_scale = 1.6f // stronger highlight
 	});
 
@@ -1122,6 +1205,7 @@ void shutdown() {
 	VkDevice& device = veekay::app.vk_device;
 
 	if (material_sampler) vkDestroySampler(device, material_sampler, nullptr);
+	if (material_sampler_mirrored) vkDestroySampler(device, material_sampler_mirrored, nullptr);
 	if (missing_texture_sampler) vkDestroySampler(device, missing_texture_sampler, nullptr);
 	for (auto &mat : materials) {
 		if (mat.albedo && mat.albedo != missing_texture) delete mat.albedo;
@@ -1133,6 +1217,10 @@ void shutdown() {
 	delete empty_specular;
 	if (empty_emissive_sampler) vkDestroySampler(device, empty_emissive_sampler, nullptr);
 	delete empty_emissive;
+
+	for (auto p : material_param_ubos) {
+		if (p) delete p;
+	}
 
 	delete cube_mesh.index_buffer;
 	delete cube_mesh.vertex_buffer;
@@ -1201,7 +1289,7 @@ void update(double time) {
 	ImGui::Separator();
 	// --- Directional light (простая запись в scene_uniforms позже) ---
 	static float dir_dir[3] = {0.3f, -1.0f, -0.4f};
-	static bool dir_enabled = true;
+	static bool dir_enabled = false;
 	static float dir_color[3] = {1.0f, 1.0f, 1.0f};
 	static float dir_intensity = 1.5f;
 	ImGui::InputFloat3("Dir light dir", dir_dir);
@@ -1267,6 +1355,33 @@ void update(double time) {
 		}
 	}
 
+	ImGui::End();
+
+	// MATERIALS UI
+	ImGui::Begin("Materials");
+	for (uint32_t i = 1; i < 3; ++i) {
+		ImGui::PushID((int)i);
+		ImGui::Text("Material %d", i);
+		MaterialParams mp = *reinterpret_cast<MaterialParams*>(material_param_ubos[i]->mapped_region);
+		bool enabled = mp.extra.x > 0.5f;
+		if (ImGui::Checkbox("Scroll enabled", &enabled)) {
+			mp.extra.x = enabled ? 1.0f : 0.0f;
+		}
+		float speed = mp.extra.y;
+		if (ImGui::SliderFloat("Speed", &speed, 0.0f, 1.0f)) {
+			mp.extra.y = speed;
+		}
+		float dirvals[2] = { mp.extra.z, mp.extra.w };
+		if (ImGui::InputFloat2("Dir", dirvals)) {
+			mp.extra.z = dirvals[0];
+			mp.extra.w = dirvals[1];
+		}
+		// write back
+		char* mem = static_cast<char*>(material_param_ubos[i]->mapped_region);
+		*reinterpret_cast<MaterialParams*>(mem) = mp;
+		ImGui::Separator();
+		ImGui::PopID();
+	}
 	ImGui::End();
 
 	if (!ImGui::IsWindowHovered()) {
@@ -1347,6 +1462,12 @@ void update(double time) {
 		sphere_model.albedo_color = sphere_color;
 	}
 
+	// Default: no scaling
+	float uvScaleU = 1.0f;
+	float uvScaleV = 1.0f;
+	float uvOffsetU = 0.0f;
+	float uvOffsetV = 0.0f;
+
 	std::vector<ModelUniforms> model_uniforms(models.size());
 	for (size_t i = 0, n = models.size(); i < n; ++i) {
 		const Model &m = models[i];
@@ -1356,6 +1477,19 @@ void update(double time) {
 		u.specular_color = veekay::vec4{m.specular_color.x, m.specular_color.y, m.specular_color.z, 0.0f};
 		// misc.x = shininess; misc.y = emissive_strength; misc.z = opacity; misc.w = specular_scale
 		u.misc = veekay::vec4{ m.shininess, m.emissive_strength, m.opacity, m.specular_scale };
+
+		if (i == 0) { // this model is the plane
+			uvScaleU = 10.0f * m.transform.scale.x;
+			uvScaleV = 10.0f * m.transform.scale.z;
+		}
+
+		if (i == 1 || i == 2 || i == 3) {
+			uvScaleU = 1.0f * m.transform.scale.x;
+			uvScaleV = 1.0f * m.transform.scale.y;
+		}
+
+		u.uv_scale_offset = veekay::vec4{ uvScaleU, uvScaleV, uvOffsetU, uvOffsetV };
+
 		model_uniforms[i] = u;
 	}
 
