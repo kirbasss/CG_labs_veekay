@@ -4,15 +4,23 @@ layout (location = 0) in vec3 f_position;
 layout (location = 1) in vec3 f_normal;
 layout (location = 2) in vec2 v_uv;
 layout (location = 3) in vec3 f_color;
+layout (location = 4) in vec4 f_light_space_pos;
 
 layout (location = 0) out vec4 final_color;
 
 layout (binding = 0, std140) uniform SceneUniforms {
 	mat4 view_projection;
+	mat4 light_view_projection;
 	vec4 camera_position;
-	vec4 dir_light_dir;
+	vec3 light_position;
+	float _pad0;
+	vec3 light_direction;
+	float dir_light_enabled;
 	vec4 dir_light_color;
 	float time;
+	float shadow_bias;
+	float shadow_strength;
+	float shadow_map_texel_size;
 };
 
 layout (binding = 1, std140) uniform ModelUniforms {
@@ -36,7 +44,7 @@ struct PointLight {
     vec4 atten;
 };
 
-layout(std430, binding = 2) buffer PointLightsBlock {
+layout(std430, binding = 2) readonly buffer PointLightsBlock {
     int numPointLights;
     int pad0;
     int pad1;
@@ -51,13 +59,16 @@ struct SpotLight {
     vec4 atten;
 };
 
-layout(std430, binding = 3) buffer SpotLightsBlock {
+layout(std430, binding = 3) readonly buffer SpotLightsBlock {
     int numSpotLights;
     int spad0;
     int spad1;
     int spad2;
     SpotLight spotLights[];
 };
+
+// Shadow sampler
+layout (binding = 4) uniform sampler2DShadow shadow_map;
 
 float calcAttenuation(vec3 lightPos, vec3 fragPos, vec3 attenParams) {
     float dist = length(lightPos - fragPos);
@@ -82,6 +93,45 @@ vec3 blinnPhong(vec3 N, vec3 V, vec3 Ldir, vec3 lightColor, float intensity, vec
     specular *= mask;
 
     return (diffuse + specular) * lightColor * intensity;
+}
+
+/*
+  computeShadow:
+  - использует f_light_space_pos (передано из вершинного)
+  - делает perspective divide -> [0,1]
+  - применяет PCF 3x3 с использованием shadow_map_texel_size
+  - возвращает значение shadow в диапазоне [0,1], где 0 = освещено, 1 = полностью в тени
+*/
+float computeShadow(vec3 normal, vec3 light_dir) {
+    vec3 proj_coords = f_light_space_pos.xyz / f_light_space_pos.w;
+    proj_coords = proj_coords * 0.5 + 0.5;
+
+    // вне карты — считаем освещенной
+    if (proj_coords.z > 1.0 || proj_coords.z < 0.0 ||
+        proj_coords.x < 0.0 || proj_coords.x > 1.0 ||
+        proj_coords.y < 0.0 || proj_coords.y > 1.0) {
+        return 0.0;
+    }
+
+    float ndotl = max(dot(normal, light_dir), 0.0);
+    float bias = max(shadow_bias * (1.0 - ndotl), shadow_bias * 0.5);
+
+    vec2 texel_size = vec2(shadow_map_texel_size);
+
+    float lit = 0.0;
+    float samples = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            vec2 offset = vec2(x, y) * texel_size;
+            // sampler2DShadow делает сравнение depth <= sampleDepth
+            lit += texture(shadow_map, vec3(proj_coords.xy + offset, proj_coords.z - bias));
+            samples += 1.0;
+        }
+    }
+
+    float visible = lit / samples; // fraction of samples that are lit (1.0 = fully lit)
+    float shadow = 1.0 - visible;  // 1.0 = fully shadowed
+    return clamp(shadow, 0.0, 1.0);
 }
 
 void main() {
@@ -116,12 +166,20 @@ void main() {
     vec3 color = vec3(0.03) * baseAlbedo;
 
     // directional light
-    if (dir_light_dir.w > 0.5) {
-        vec3 Ldir = normalize(dir_light_dir.xyz);
+    if (dir_light_enabled > 0.5) {
+        vec3 Ldir = -normalize(light_direction);
         float intensity = dir_light_color.w;
         vec3 lightCol = dir_light_color.xyz;
 
-        color += blinnPhong(N, V, Ldir, lightCol, intensity, baseAlbedo, specColor, shininess, specularScale, texSpec);
+        // compute shadow only for surfaces facing the light
+        float diffN = max(dot(N, Ldir), 0.0);
+
+        float shadow = 0.0;
+        if (diffN > 0.0) {
+            shadow = computeShadow(N, Ldir) * shadow_strength;
+        }
+
+        color += blinnPhong(N, V, Ldir, lightCol, intensity, baseAlbedo, specColor, shininess, specularScale, texSpec) * (1.0 - shadow);
     }
 
     // point lights
