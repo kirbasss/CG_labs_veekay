@@ -927,8 +927,8 @@ void initialize(VkCommandBuffer cmd) {
 		}
 
 		VkSamplerCreateInfo sInfoMir = sInfo;
-		sInfoMir.magFilter = VK_FILTER_LINEAR;
-		sInfoMir.minFilter = VK_FILTER_LINEAR;
+		sInfoMir.magFilter = VK_FILTER_NEAREST;
+		sInfoMir.minFilter = VK_FILTER_NEAREST;
 		sInfoMir.addressModeU = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
 		sInfoMir.addressModeV = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
 		sInfoMir.addressModeW = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
